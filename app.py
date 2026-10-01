@@ -22,8 +22,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.7.0"
-APP_VERSION = "1.7.0"
+APP_NAME = "Book Sale Notification 1.7.1"
+APP_VERSION = "1.7.1"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -294,6 +294,71 @@ class DB:
         self.cx.execute("INSERT OR IGNORE INTO price_history(offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)",(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value))
         self.cx.execute("INSERT OR IGNORE INTO list_books(list_id,book_id) VALUES(?,?)",(list_id,bid)); self.cx.commit(); return bid,True
 
+    def import_manual_bundle(self, primary, offers, list_id=1):
+        """Atomically add one manually supplied product and exact cross-store matches.
+
+        Unlike wishlist HTML import, this is an explicit reconciliation operation:
+        the supplied product is authoritative and the other store offers have already
+        been matched by the live providers before this method is called.
+        """
+        offers=[o for o in offers if o and o.store in STORES]
+        if not offers:
+            raise ValueError("No valid store products were found.")
+
+        # If any exact product identity is already known, reuse that canonical book.
+        existing_ids=set()
+        for o in offers:
+            url=canonical_url(o.url)
+            row=self.cx.execute(
+                "SELECT book_id FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",
+                (o.store,o.store_id or "",url)
+            ).fetchone()
+            if row: existing_ids.add(row["book_id"])
+        if len(existing_ids)>1:
+            raise ValueError("The matched store products already belong to different books. Use Find Missing Matches first.")
+        if existing_ids:
+            bid=next(iter(existing_ids))
+        else:
+            cur=self.cx.execute("INSERT INTO books(title,norm_title,author) VALUES(?,?,?)",
+                                (primary.title,normalize_title(primary.title),primary.author or ""))
+            bid=cur.lastrowid
+
+        self.cx.execute("INSERT OR IGNORE INTO list_books(list_id,book_id) VALUES(?,?)",(list_id,bid))
+
+        for o in offers:
+            url=canonical_url(o.url)
+            exact=self.cx.execute(
+                "SELECT id,book_id FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",
+                (o.store,o.store_id or "",url)
+            ).fetchone()
+            if exact:
+                if exact["book_id"]!=bid:
+                    raise ValueError(f"{o.store} exact product is already attached to another book.")
+                oid=exact["id"]
+                self.cx.execute("""UPDATE offers SET title=?,url=?,price=?,list_price=?,reward_pct=?,
+                    reward_value=?,tax_ex_price=?,author=?,flags=?,observed_at=CURRENT_TIMESTAMP WHERE id=?""",
+                    (o.title,url,o.price,o.list_price,o.reward_pct,o.reward_value,o.tax_ex_price,
+                     o.author,o.flags,oid))
+            else:
+                same_store=self.cx.execute("SELECT id FROM offers WHERE book_id=? AND store=?",(bid,o.store)).fetchone()
+                if same_store:
+                    # Never replace a different same-store identity implicitly.
+                    continue
+                cur=self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,price,list_price,
+                    reward_pct,reward_value,tax_ex_price,author,flags,locked,observed_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,CURRENT_TIMESTAMP)""",
+                    (bid,o.store,o.store_id,o.title,url,o.price,o.list_price,o.reward_pct,
+                     o.reward_value,o.tax_ex_price,o.author,o.flags))
+                oid=cur.lastrowid
+            self.cx.execute("""INSERT OR IGNORE INTO price_history
+                (offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)""",
+                (oid,o.price,o.list_price,o.reward_pct,o.reward_value))
+
+        self.cx.execute("UPDATE books SET title=?,norm_title=?,author=? WHERE id=?",
+                        (primary.title,normalize_title(primary.title),primary.author or "",bid))
+        self.cx.commit()
+        return bid
+
     def find_book(self, offer):
         r=self.cx.execute("SELECT book_id FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",(offer.store,offer.store_id,canonical_url(offer.url))).fetchone()
         if r:return r['book_id'],1.0
@@ -497,6 +562,7 @@ class App(tk.Tk):
         ttk.Button(top,text="Recently Deleted",command=self.recently_deleted).pack(side="right",padx=4)
         ttk.Button(top,text="Backup / Share",command=self.backup_share_dialog).pack(side="right",padx=4)
         ttk.Button(top,text="Import HTML…",command=self.import_html).pack(side="right",padx=4)
+        ttk.Button(top,text="Add from URL…",command=self.manual_add_url).pack(side="right",padx=4)
         ttk.Button(top,text="Import 3-store folder…",command=self.import_folder).pack(side="right",padx=4)
 
         phase=ttk.Frame(self,padding=(10,0,10,7)); phase.pack(fill="x")
@@ -911,6 +977,110 @@ class App(tk.Tk):
             _bid,isnew=self.db.import_offer(o,self.current_list_id)
             added += 1 if isnew else 0; existing += 0 if isnew else 1
         return store,len(offers),added,existing
+
+    def _store_from_product_url(self, url):
+        url=(url or "").strip()
+        for store in STORES:
+            if valid_store_url(store,url):
+                return store
+        return None
+
+    def manual_add_url(self):
+        win=tk.Toplevel(self)
+        win.title("Add book from store URL")
+        win.geometry("720x205")
+        win.resizable(False,False)
+        win.transient(self)
+        win.grab_set()
+
+        f=ttk.Frame(win,padding=16); f.pack(fill="both",expand=True)
+        ttk.Label(f,text="Add from BookLive / BOOK☆WALKER / DMM URL",
+                  font=("Segoe UI",11,"bold")).pack(anchor="w")
+        ttk.Label(f,text=("Paste one product URL. The app will fetch that exact product, then search the other "
+                          "two stores and fetch their product pages before adding anything to the list."),
+                  wraplength=675).pack(anchor="w",pady=(5,10))
+        urlvar=tk.StringVar()
+        ent=ttk.Entry(f,textvariable=urlvar,width=92); ent.pack(fill="x",pady=(0,12)); ent.focus_set()
+
+        footer=ttk.Frame(f); footer.pack(fill="x",side="bottom")
+        ttk.Button(footer,text="Cancel",command=win.destroy).pack(side="right")
+        ttk.Button(footer,text="Fetch all stores and add",
+                   command=lambda:self._start_manual_add(urlvar.get(),win)).pack(side="right",padx=(0,8))
+        ent.bind("<Return>",lambda _e:self._start_manual_add(urlvar.get(),win))
+
+    def _start_manual_add(self, url, dialog):
+        url=(url or "").strip()
+        source_store=self._store_from_product_url(url)
+        if not source_store:
+            messagebox.showerror("Invalid store URL",
+                "Paste a valid BookLive, BOOK☆WALKER or DMM Books product URL.")
+            return
+
+        dialog.destroy()
+        self.status.set(f"Reading {source_store} product…")
+        self.log(f"[Manual add] Source: {source_store} • {url}")
+
+        def work():
+            try:
+                source_result=self.providers[source_store].product(url)
+                if not source_result or not source_result.title:
+                    raise RuntimeError(f"{source_store} did not return usable product metadata.")
+
+                primary=self._offer_from_live(source_result)
+                found={source_store:primary}
+                self.log(f"[Manual add] Anchor title: {primary.title}")
+
+                # Explicit manual add always checks all three stores, regardless of the
+                # automatic-update enable/disable toggles.
+                for store in STORES:
+                    if store==source_store: continue
+                    self.after(0,lambda st=store:self.status.set(f"Searching {st}…"))
+                    self.log(f"[Manual add] Searching {store} for: {primary.title}")
+                    try:
+                        result=self.providers[store].best(primary.title,primary.author)
+                        if result:
+                            found[store]=self._offer_from_live(result)
+                            self.log(f"[Manual add] Matched {store}: {result.title} • {result.url}")
+                        else:
+                            self.log(f"[Manual add] No confident {store} match")
+                    except Exception as e:
+                        self.log(f"[Manual add] {store} failed: {type(e).__name__}: {e}")
+
+                # Nothing is persisted until every store has been attempted.
+                self.after(0,lambda:self._finish_manual_add(primary,found))
+            except Exception as e:
+                self.after(0,lambda e=e:messagebox.showerror("Manual add failed",f"{type(e).__name__}: {e}"))
+                self.after(0,lambda:self.status.set("Ready"))
+
+        self._run_background(work)
+
+    def _finish_manual_add(self, primary, found):
+        try:
+            self.auto_backup("manual_add_url")
+            bid=self.db.import_manual_bundle(primary,list(found.values()),self.current_list_id)
+
+            # Download the best available cover after the database transaction.
+            for store in ("BookLive","BOOK☆WALKER","DMM"):
+                o=found.get(store)
+                if o and o.cover_url:
+                    self.cache_cover(bid,store,o.cover_url)
+                    break
+
+            self.refresh()
+            lines=[]
+            for store in STORES:
+                o=found.get(store)
+                if not o:
+                    lines.append(f"{store}: no confident match")
+                    continue
+                price=f"¥{o.price:,}" if o.price is not None else "price unavailable"
+                lines.append(f"{store}: {price}\n{o.url}")
+            messagebox.showinfo("Book added",
+                f"{primary.title}\n\nChecked all three stores before adding.\n\n" + "\n\n".join(lines))
+        except Exception as e:
+            messagebox.showerror("Manual add failed",f"{type(e).__name__}: {e}")
+        finally:
+            self.status.set("Ready")
 
     def import_html(self):
         p=filedialog.askopenfilename(title="Import wishlist HTML",filetypes=[("HTML files","*.html *.htm"),("All files","*.*")])
