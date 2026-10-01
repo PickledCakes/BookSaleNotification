@@ -25,8 +25,8 @@ except ImportError:
 APP_NAME = "Book Sale Notification 1.7.0"
 APP_VERSION = "1.7.0"
 # Set these before publishing GitHub releases.
-GITHUB_OWNER = ""
-GITHUB_REPO = ""
+GITHUB_OWNER = "PickledCakes"
+GITHUB_REPO = "BookSaleNotification"
 UPDATE_ASSET_PREFIX = "BookSaleNotification-Windows-"
 def app_data_dir():
     if getattr(sys,"frozen",False):
