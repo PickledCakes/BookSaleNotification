@@ -1,236 +1,690 @@
-# Book Sale Notification 1.2.8
+# Book Sale Notification
 
-Three-store live-scraper build: BookLive, BOOK☆WALKER, DMM Books.
+A Windows desktop app for keeping a personal Japanese ebook watchlist across:
 
-## New in 1.2
-- Live product-page price refresh for known store URLs.
-- Live discovery for missing store matches.
-- Accuracy-first title/volume resolver ported from the Calibre work.
-- Numeric volumes, （N）, N巻, 第N巻, Vol.N, 上/中/下 and bonus/special-edition penalties.
-- BOOK☆WALKER series-page expansion for grouped search results.
-- Known/manual URLs remain authoritative and are never replaced by the matcher.
-- Conservative 0.90 acceptance threshold: uncertain results remain blank.
-- Shared rate-limited HTTP client with configurable minimum request delay.
-- Active/purchased filtering: purchased books are not included in normal live update cycles.
-- Every successful refresh becomes a price-history observation.
+- **BookLive**
+- **BOOK☆WALKER**
+- **DMM Books**
 
-Amazon remains disabled for this phase.
+The app imports books from saved wishlist HTML or from a single product URL, tries to match the same volume across the other supported stores, records prices over time, and gives you one place to compare the current cash price.
 
-## Test sequence
-1. Start with a fresh database.
-2. Import the three saved wishlist HTML files.
-3. Select one book with missing stores and click **Find missing matches**.
-4. Inspect its URLs using **Edit store URLs**.
-5. Click **Update prices** to refresh all currently matched active products.
-6. Check **History** after an update.
+> **Current version: 1.7.1**
+>
+> Amazon is intentionally disabled for now.
 
-The scraper uses only public store/search/product pages. It does not use or store login cookies or credentials.
+---
 
-Live storefront markup changes over time. A parser failure should leave a book unmatched or an update failed rather than silently replacing a manually locked match.
+## What the program can do
 
+### Import a wishlist from any supported store
 
-## 1.2.1 hotfix
-Fixed the Tkinter background-error callback so the original live-scraper exception is displayed instead of raising a secondary `NameError` after the `except` block exits.
+You can save your wishlist / saved-books page from BookLive, BOOK☆WALKER, or DMM Books as an HTML file and import it into the app.
 
-## 1.2.2 hotfix
-Fixed SQLite threading correctly: live matching and live price-update workers now create and close their own SQLite connections on the worker thread. The Tk GUI continues using its main-thread connection. This avoids sharing a SQLite connection across threads rather than disabling SQLite's thread check.
+Wishlist import is deliberately conservative:
 
+- the app uses the store's product URL / product ID as the identity;
+- importing the same store item again updates/reuses that item instead of creating another copy;
+- **titles are not fuzzy-merged during HTML import**;
+- two different product IDs from the same store are treated as different products even when their titles look almost identical.
 
-## 1.2.3 diagnostics
-Fixed matching-dialog line breaks and added a right-side Activity console with request URLs, HTTP status/size/final URL, candidate counts/scores, accepted matches, update results and exceptions. Matching errors are no longer silently swallowed.
+This avoids accidentally combining things such as a normal volume, a split/serial edition, a special edition, or another genuinely different product.
 
+### Add a book manually from a product URL
 
-## 1.2.8 resolver + product-page parsing
-- BOOK☆WALKER uses the exact product price block for current税込 price, tax-exclusive price, pre-sale price, and granted coins.
-- DMM treats search hits as series entry points, inspects the product page sibling-volume list, and resolves the requested numbered volume before accepting a match.
-- DMM price parsing prefers schema.org Product/DataFeed offers instead of arbitrary yen text on the page.
-- BookLive searches the title without the volume suffix first, identifies the matching `title_id` family, then resolves and verifies the requested `vol_no`.
-- BookLive price parsing prefers its embedded ecommerce `priceTax` value.
-- The 0.90 confidence threshold remains unchanged; uncertain identity is still rejected rather than guessed.
+Click **Add from URL…** and paste a product URL from any one of the three stores.
 
-## 1.2.8
-- Library rows now support Ctrl+click and Shift+click multi-selection.
-- Find missing matches and Update prices operate on all selected rows in one run; no selection keeps the all-active-books behavior.
-- Successful lightweight matches are immediately resolved through the product page before saving, so BOOK☆WALKER price fields are populated on first match.
-- DMM rejects moving `/latest/` aliases and prefers permanent content-specific URLs from structured series/product data.
+The app will:
 
-## 1.2.8
-- Fixed BOOK☆WALKER Japanese-title mojibake caused by heuristic response encoding detection.
-- DMM now keeps `/latest/` only as a temporary discovery route for the newest numbered volume.
-- When `/latest/` is the requested volume, DMM verifies the numbered title, reads `og:url`, and stores the permanent `/product/<series>/<content_id>/` URL.
-- The strict 0.90 identity threshold remains unchanged.
+1. fetch the exact pasted product;
+2. read its title, author, current price and available metadata;
+3. use that book as the anchor;
+4. search the other two supported stores;
+5. fetch the matched product pages so price/reward metadata is populated;
+6. only then add the book to the current list.
 
-### 1.2.8 price-view update
-- BOOK☆WALKER now stores tax-inclusive and exact tax-exclusive prices independently.
-- Toggling overseas-tax mode immediately redraws BOOK☆WALKER cells from stored data; it performs no network request.
-- Toggling direct rewards immediately redraws DMM/BOOK☆WALKER cells.
-- Rewards ON: DMM shows `¥price + N%pt`; BOOK☆WALKER shows `¥price + N coin`.
-- Rewards OFF: store columns show only the current cash price (including ordinary cash-sale discounts).
+This is useful when you only want to add one new volume and do not want to export a fresh wishlist HTML file.
 
-## 1.2.8
-- BOOK☆WALKER tax-inclusive, tax-exclusive and coin values are stored separately and the settings toggle redraws immediately.
-- DMM parses the product cashback display such as `38%(144pt)還元` and stores the exact point amount.
-- Reward toggle shows/hides DMM points and BOOK☆WALKER coins without a network request.
-- Ctrl+A selects all visible rows.
-- Delete applies to all selected rows.
+### Find the same book on the other stores
 
-## 1.2.9
-- Fixed BOOK☆WALKER direct-coin extraction by parsing the numeric coin value independently of currency parsing.
-- Added a fallback around the `付与コイン` text for alternate BOOK☆WALKER markup.
-- Activity now logs BOOK☆WALKER cash/tax-exclusive/coin values.
-- Removed the old `v1.2.5` and `1.1 testing phase` version labels. Only the window title shows `1.2.9`.
+Select one or more books and click **Find missing matches**.
 
-## 1.3.0
-- Cover column on the far left. BookLive is preferred; BOOK☆WALKER/DMM only fill a missing cover.
-- Covers are cached locally as JPEG and capped at 800x1200; table thumbnails are about 50x70.
-- Each store price now includes its last successful update timestamp underneath.
-- Lowest cash price respects BOOK☆WALKER overseas-tax mode and ignores coins/points.
+The matcher searches missing stores using the title/volume information it already has. It is intentionally accuracy-first: if a result is not confident enough, the store is left blank rather than guessed.
 
-## 1.3.1
-- Fixed the remaining literal `\\n` display bugs globally, including timestamps and confirmation/error dialogs.
-- Added an instant `Show book covers` setting.
-- Added Small / Medium / Large cover display sizes.
-  - Small: 50x70 (the original 1.3.0 size)
-  - Medium: 75x105 (default)
-  - Large: 100x140
-- Turning covers off collapses the cover column and restores compact rows.
-- Cover size changes reuse the existing local cache and never redownload images.
+The matcher understands common volume formats such as:
 
-## 1.3.2
-- Lowest cash price names the cheapest enabled store underneath.
-- If every enabled/matched store has the same cash price, it says `Same`; partial ties list the tied stores.
-- Settings can independently disable BookLive, BOOK☆WALKER and DMM.
-- Disabled stores are hidden and skipped by matching, price updates, lowest-price calculations and cover fetching.
-- Existing disabled-store matches, prices and history remain stored for later re-enabling.
+- trailing numbers;
+- `（3）`;
+- `3巻` / `第3巻`;
+- `Vol.3`;
+- `上` / `中` / `下`.
 
-## 1.3.3
-- Fixed manual store URLs showing `?` even when the live scraper successfully parsed a price.
-- Price refreshes for already-associated products now update the exact `(book, store)` offer in place.
-- Refreshing an existing product no longer runs through canonical-book matching/merge logic.
-- Locked/manual URLs remain authoritative and are never replaced by the fetched page.
-- Price, list price, rewards, tax-exclusive price, title/author metadata and observation timestamp are refreshed normally.
-- Price history continues to be recorded against the existing offer.
+Product/edition markers are treated as hard compatibility rules. A normal edition will not be accepted as the same product as markers such as:
 
-## 1.3.4
-- Update prices now also refreshes a book's cover when the store's cover URL changes.
-- Fixes DMM preorder books retaining an early placeholder/missing-cover image after the real cover is published.
-- Cover source priority remains BookLive > BOOK☆WALKER > DMM, so a DMM refresh cannot overwrite a BookLive cover.
-- Same-store cover changes are allowed, so DMM can replace its own earlier preorder image.
+- `分冊版`
+- `単話版`
+- `合本版`
+- `特装版`
+- `無料版`
+- `セット版`
 
+After a matching run, the app shows a copyable audit report with matches, misses and merges.
 
-## 1.4
-- Wishlist HTML import is identity-only: same store URL/ID is a duplicate; titles are never fuzzy-merged during import.
-- Find Missing Matches is now the explicit reconciliation/merge step and produces a copyable audit report.
-- Same-store different product identities are protected from fuzzy merging.
-- Automatic database snapshot before destructive/bulk operations; newest 5 retained.
-- Recently Deleted supports restoring deleted books and books absorbed by merges; default retention 14 days.
-- Purchased books move to Archived and are excluded from normal matching/updates.
-- Excel-style list tabs, custom list creation, and shared-list import into a separate tab.
-- Light/dark appearance setting.
-- Price update continues refreshing changed covers (including DMM preorder cover changes).
+### Compare current prices
 
-## 1.4.1
-- Reworked Dark appearance into a complete high-contrast ttk theme.
-- Explicit dark styling for buttons, tabs, headers, entries, comboboxes, check/radio controls, scrollbars, tables and activity console.
-- Fixed Settings footer so Save and Cancel are always visible and labelled.
-- Fixed Recently Deleted footer with visible Restore selected, Permanently delete selected and Close buttons.
-- Recently Deleted displays the configured retention period.
+Each canonical book can hold one matched offer for each supported store.
 
-## 1.4.2
-- Fixed Light mode retaining Dark-mode ttk state mappings after changing appearance.
-- Light mode now explicitly resets normal, hover/active, pressed, selected, readonly and disabled colors.
-- Added a dedicated Settings button style so Save and Cancel labels remain visible in both themes.
-- Dark mode palette from 1.4.1 is otherwise unchanged.
+The table shows:
 
-## 1.4.3 hotfix
-- Replaced the Settings Save/Cancel footer controls with explicitly coloured native buttons so their labels are always visible.
-- Fixed dark-mode disabled and read-only Entry text contrast.
-- Fixed dark-mode Combobox disabled/read-only text contrast.
-- Light-mode styling from 1.4.2 is unchanged.
+- BookLive price;
+- BOOK☆WALKER price;
+- DMM price;
+- the lowest current **cash** price;
+- which store is cheapest;
+- how many enabled stores are currently matched;
+- the last observation time;
+- an optional cached cover.
 
-## 1.4.4
-- Fixed the main vertical scrollbar throwing `invalid command name ".!treeview"`.
-- The main Treeview is now created only once in its final container; the scrollbar is bound afterward to that live widget.
-- Enlarged Settings Save and Cancel buttons with wider labels and substantially more vertical/horizontal click padding.
+DMM points and BOOK☆WALKER coins can be displayed beside the cash price, but they do **not** reduce the value used for **Lowest cash price**.
 
-### 1.4.4 button-height hotfix
-- Settings Save and Cancel now use fixed 120×36 pixel hosts so Windows/Tk cannot collapse their height.
+### Refresh prices and covers
 
-### 1.4.4 Hotfix 2
-- Settings window is now a fixed 590×750 px and non-resizable.
-- Provides enough vertical room for all current settings plus the full 120×36 Save/Cancel footer without Tk compressing the controls.
+Select one or more books and click **Update prices**.
 
-## 1.5
-- Added Calibre Library Sync under Backup / Share.
-- Imports a Calibre CSV export and reads only the `identifiers` column for matching.
-- Supported exact identifiers: `bl:`, `bw:`, and `dmm:`.
-- No title, author, series, ISBN, ASIN, or fuzzy fallback matching is performed.
-- One exact supported identifier is enough to archive the entire canonical book, including its other matched stores.
-- Preview shows books to archive, already archived matches, and supported identifiers not found in the wishlist.
-- Creates an automatic database backup before applying the bulk archive.
-- Completion report is copyable and records the exact identifier(s) responsible for each archive.
+You can choose:
 
-### 1.5 fixed-window hotfix
-- All app-created secondary/Toplevel windows now use an explicit fixed size and are non-resizable.
-- Backup / Share enlarged to 540×520 so the Calibre Library sync control is fully visible.
+- **Update covers only**
+- **Update books without price**
+- **Update everything selected**
 
-## 1.5.1
-- Calibre Sync preview no longer lists every supported identifier that is absent from the wishlist.
-- The unmatched total is still shown in the summary.
-- Exact matched books and the identifiers responsible for those matches remain visible.
-- Includes the 1.5 fixed-window changes for all secondary dialogs.
+Existing store associations are refreshed in place. An ordinary price refresh does not rematch the book to a different product.
 
-## 1.6
-- Update Prices now opens a fixed options dialog for selected books:
-  - Update covers only
-  - Update books without price
-  - Update everything selected
-- Clearing an existing store URL in Edit store URLs now removes that store match entirely, including store ID, price/reward data and that offer's price history, while preserving the canonical book and other stores.
-- A confirmation and automatic backup are performed before store-match removal.
-- Matching now treats edition/product markers such as 分冊版, 単話版, 合本版, 特装版, 無料版 and セット版 as hard compatibility rules instead of small fuzzy-score penalties.
-- BookLive direct volume resolution applies the same edition guard, preventing a failed normal-volume candidate from falling through to a 分冊版 candidate.
-- Cover-assisted matching remains disabled/not implemented.
+Each successful price refresh becomes a price-history observation.
 
-## 1.6.1
-- Edit store URLs validates manually entered links before saving.
-- BookLive accepts BookLive product URLs only.
-- BOOK☆WALKER accepts BOOK☆WALKER `/de…` product URLs only.
-- DMM accepts DMM Books product URLs only.
-- Wrong-store or malformed URLs block the entire save and leave the database unchanged.
-- Clearing an existing URL still removes that store match as introduced in 1.6.
+### Keep price history
 
+Click **History** on a selected book to see recorded observations for its store offers.
 
-## 1.7.0 — Tester distribution
+The app can show the lowest price it has personally recorded. This is **not guaranteed to be the store's all-time historical low**; it only knows prices observed while using this database or imported through shared history.
 
-This release adds Windows distribution infrastructure.
+### Edit or remove store matches manually
 
-### Windows packaged build
-The PyInstaller build is an `onedir` application. Tester data is stored separately under:
+Select a book and click **Edit store URLs**.
+
+Manual URLs are validated by store:
+
+- BookLive fields accept BookLive product links;
+- BOOK☆WALKER fields accept BOOK☆WALKER product links;
+- DMM fields accept DMM Books product links.
+
+A manually changed URL is treated as authoritative.
+
+If you clear an existing store URL and save, that store match is removed entirely, including:
+
+- the store URL;
+- product ID;
+- current price/reward data;
+- that offer's price history.
+
+The canonical book and its other store matches remain intact.
+
+### Archive purchased books
+
+Use **Mark purchased** to move books out of the active list and into **Archived**.
+
+Archived books keep their metadata and price history but are excluded from normal matching and update work.
+
+They can be restored later.
+
+### Recently Deleted and recovery
+
+Deleting a book moves it to **Recently Deleted** rather than immediately destroying it.
+
+The default retention period is 14 days and can be changed in Settings.
+
+You can restore deleted items during the retention window or permanently delete them manually.
+
+Merges performed by reconciliation are also recorded so absorbed books can be restored.
+
+### Multiple lists
+
+The tabs across the top work like simple spreadsheet tabs.
+
+- **My List** is the default list.
+- Click **+** to create another list.
+- **Archived** contains purchased books.
+
+Shared lists are imported into their own list tab rather than silently mixing everything into your main list.
+
+### Backup and sharing
+
+**Backup / Share** includes:
+
+- Save Backup As…
+- Restore Backup…
+- Export shared book list
+- View/import shared book list
+- Export price history
+- Import price history
+- Calibre purchase sync
+
+Before destructive or bulk operations, the app also creates automatic database snapshots and keeps the newest five.
+
+Shared-list files contain public book/store metadata. They do not intentionally contain store passwords, cookies or login sessions.
+
+### Calibre purchase sync
+
+If your Calibre library contains store identifiers, Book Sale Notification can use a Calibre CSV export to archive books you already own.
+
+Supported exact identifiers are:
+
+- `bl:<title_id>:<vol_no>`
+- `bw:<BOOKWALKER product UUID>`
+- `dmm:<DMM content ID>`
+
+The CSV must contain an `identifiers` column.
+
+Calibre sync uses **exact identifiers only**. It does not use title, author, ISBN or fuzzy matching as a fallback.
+
+A preview is shown before anything is changed.
+
+### Covers
+
+Covers are downloaded from matched product pages and cached locally.
+
+Cover priority is:
+
+1. BookLive
+2. BOOK☆WALKER
+3. DMM
+
+This prevents a lower-priority source from replacing a good BookLive cover, while still allowing the same store to refresh its own cover later—for example when a preorder placeholder is replaced by the final artwork.
+
+Cover display can be disabled or changed between Small, Medium and Large.
+
+### Light and dark appearance
+
+Settings provides:
+
+- System
+- Light
+- Dark
+
+The current System option uses the app's conservative light appearance rather than trying to infer Windows dark mode unreliably.
+
+### GitHub updates
+
+Packaged Windows builds include **Check for Updates**.
+
+The app checks the latest release from:
+
+`PickledCakes/BookSaleNotification`
+
+When a newer packaged release is available, the app can download the Windows release ZIP and restart into the new version.
+
+Source-code launches do not self-replace.
+
+---
+
+# Installing the Windows version
+
+The easiest way to use the program is to download the newest Windows package from the GitHub **Releases** page.
+
+The release asset is named similarly to:
+
+`BookSaleNotification-Windows-1.7.1.zip`
+
+1. Download the ZIP.
+2. Extract the ZIP somewhere writable, for example your Desktop or Documents folder.
+3. Open the extracted **Book Sale Notification** folder.
+4. Run **Book Sale Notification.exe**.
+
+The Windows build currently uses PyInstaller's **onedir** format, so the EXE needs the accompanying `_internal` folder. Do not move only the EXE out of the extracted folder.
+
+### Windows SmartScreen
+
+The tester builds are not currently code-signed. Windows may therefore show a SmartScreen / unknown publisher warning even when the file was built by this repository's GitHub Actions workflow.
+
+Only download builds from this repository's Releases page if you want to use the distributed version.
+
+---
+
+# Where your data is stored
+
+The packaged Windows build stores its database separately from the application files:
 
 `%LOCALAPPDATA%\BookSaleNotification\`
 
-This keeps the database and backups outside the application folder so a program update does not replace user data.
+This is intentional. Replacing or updating the application folder should not replace your personal database.
 
-### GitHub Actions
-`.github/workflows/windows-release.yml` builds the Windows package on GitHub's Windows runner.
+Automatic backups are stored below the app data directory.
 
-- **Actions → Build Windows Release → Run workflow** creates a downloadable test artifact.
-- Pushing a tag such as `v1.7.0` builds the Windows package and attaches `BookSaleNotification-Windows-1.7.0.zip` to a GitHub Release.
+Cover images are cached separately in the user's home directory under:
 
-### Enable automatic updates
-Before publishing the repository, set `GITHUB_OWNER` and `GITHUB_REPO` near the top of `app.py`.
+`~/.book_sale_notification/covers/`
 
-The packaged app's **Check for Updates** button checks the repository's latest published GitHub Release. If a newer version exists, it can download the Windows release ZIP, verify the GitHub-provided SHA-256 digest when available, close the app, replace the application files, and restart it.
+When running directly from source rather than from the packaged EXE, the database is kept beside the source files.
 
-Source builds intentionally do not self-replace.
+---
 
+# Saving wishlist HTML
 
-## 1.7.1
-- Added **Add from URL…** for manual entry without exporting wishlist HTML.
-- Paste a BookLive, BOOK☆WALKER, or DMM Books product URL.
-- The pasted product is fetched first and used as the authoritative title/author anchor.
-- The app then searches both other stores and fetches matched product pages so current price, rewards/tax data, URLs, IDs, author metadata, and available cover metadata are populated before the book is written to the list.
-- All three stores are attempted before anything is saved.
-- Manual URL add is an explicit cross-store reconciliation path and does not change the conservative same-store-only behavior of wishlist HTML imports.
-- Exact existing product identities are reused instead of creating duplicates.
-- Different same-store product identities are never silently replaced.
+HTML import is meant as a convenient way to seed the database with a large existing wishlist.
+
+You must save the page that actually contains the books. Saving a store homepage, search page, account landing page, or an empty wishlist page will not work.
+
+## General browser steps
+
+For all three stores:
+
+1. Sign in to the store normally in your browser.
+2. Open the wishlist / saved-books page containing the books you want to import.
+3. Make sure the books are actually visible on the page.
+4. If the site uses pagination, import each relevant page or change the site to show as many books per page as possible.
+5. If the site lazy-loads items while scrolling, scroll through the list first so the entries have loaded.
+6. Press **Ctrl+S** in Chrome/Edge.
+7. Save the page as an `.html` / `.htm` file.
+   - **Webpage, HTML Only** is the simplest option.
+   - **Webpage, Complete** is also fine; the app only reads the HTML file and does not need the companion asset folder.
+8. In Book Sale Notification, click **Import HTML…** and choose the saved file.
+
+You can also put one saved HTML file from each store into the same folder and use **Import 3-store folder…**.
+
+## BookLive
+
+1. Sign in to BookLive.
+2. Open your BookLive saved/wishlist page containing the books you want to track.
+3. Make sure the individual saved-book rows are visible.
+4. Load/scroll through all entries you expect to import.
+5. Press **Ctrl+S** and save the page as HTML.
+6. Import that HTML with **Import HTML…**.
+
+The current parser expects BookLive's saved-list layout and product links containing:
+
+`/product/index/title_id/.../vol_no/...`
+
+If BookLive redesigns that page, HTML import may temporarily stop recognizing entries until the parser is updated.
+
+## BOOK☆WALKER
+
+1. Sign in to BOOK☆WALKER.
+2. Open the page containing your saved/favourite books.
+3. Ensure the book list itself is visible, not just an account/menu screen.
+4. Scroll/load the complete set you want to capture.
+5. Save the page with **Ctrl+S**.
+6. Import the resulting HTML.
+
+The current wishlist parser recognizes BOOK☆WALKER's saved-item cards and product identities. If the saved file contains only part of a dynamically loaded list, only that part can be imported.
+
+## DMM Books
+
+1. Sign in to DMM Books.
+2. Open **あとで買う**.
+3. Make sure all books you want are visible on the page.
+4. Load/scroll through the relevant entries.
+5. Press **Ctrl+S** and save the page as HTML.
+6. Import that HTML into Book Sale Notification.
+
+DMM occasionally exposes the newest volume through a moving `/latest/` URL. The live matcher/product scraper resolves that to DMM's permanent content-specific URL before storing it whenever possible.
+
+---
+
+# Recommended first-time workflow
+
+For a large existing wishlist, a good first run is:
+
+1. Save your wishlist HTML from BookLive, BOOK☆WALKER and/or DMM.
+2. Import each HTML file.
+3. Look over the imported titles before doing matching.
+4. Select a small sample and click **Find missing matches**.
+5. Inspect the Match Results report.
+6. Use **Edit store URLs** to verify any books you are unsure about.
+7. Once you are happy with the results, run **Find missing matches** on a larger selection.
+8. Select books and use **Update prices → Update everything selected**.
+9. Use **History** over time to build your own price record.
+
+For one new book, **Add from URL…** is faster than exporting HTML again.
+
+---
+
+# Main controls
+
+## Import HTML…
+
+Imports one saved wishlist HTML file.
+
+Duplicate detection is based on same-store product identity, not fuzzy title matching.
+
+## Import 3-store folder…
+
+Scans a folder for recognizable BookLive, BOOK☆WALKER and DMM wishlist HTML files and imports them.
+
+## Add from URL…
+
+Adds one product manually and checks all three supported stores before saving it.
+
+## Find missing matches
+
+Searches enabled stores that are missing from the selected books.
+
+- With selected rows: works on those rows.
+- With no selection: asks whether to process all active books in the current list.
+
+The operation can also reconcile duplicate canonical entries when they came from different stores and confidently represent the same volume.
+
+## Update prices
+
+Requires one or more selected books.
+
+Choose between:
+
+- covers only;
+- only offers currently missing a price;
+- everything selected.
+
+## Edit store URLs
+
+Lets you inspect, open, correct, lock or remove individual store associations.
+
+## History
+
+Shows recorded price observations for the selected canonical book.
+
+## Mark purchased
+
+Moves selected active books to Archived.
+
+## Delete
+
+Moves selected books to Recently Deleted.
+
+## Ctrl+A
+
+Selects all currently visible rows.
+
+## Double-click a store cell
+
+Opens that store's public product page for the book.
+
+---
+
+# Settings
+
+## Direct rewards
+
+When enabled:
+
+- DMM can display direct points;
+- BOOK☆WALKER can display granted coins.
+
+These rewards are displayed separately and are not subtracted from the lowest cash price.
+
+## BOOK☆WALKER overseas tax mode
+
+When the scraper has an exact stored tax-exclusive price, this setting can display that value for BOOK☆WALKER instead of the domestic tax-inclusive value.
+
+The app does **not** blindly estimate the tax-exclusive amount by subtracting 10%.
+
+## Store toggles
+
+BookLive, BOOK☆WALKER and DMM can be enabled or disabled independently.
+
+A disabled store is:
+
+- hidden from the main comparison view;
+- skipped by normal missing-match searches;
+- skipped by normal price updates;
+- skipped for cover fetching.
+
+Its existing data is not deleted.
+
+The explicit **Add from URL…** workflow checks all three stores because its purpose is to build a complete manual match set.
+
+## Request delay
+
+The minimum delay between store requests can be adjusted.
+
+Please do not set this aggressively low. The app intentionally spaces requests because storefronts may rate-limit or block rapid automated traffic.
+
+## Recently Deleted retention
+
+Controls how long deleted/merged recovery records are retained before cleanup.
+
+## Notification rule / automatic update interval
+
+The settings UI currently contains notification-rule and automatic-update-interval options.
+
+**Important:** in 1.7.1, the normal desktop app does not yet implement an unattended background scheduler or Windows sale-notification service. Price checks are still initiated through the app's update controls. Treat these settings as groundwork for the future notification system rather than a guarantee that the app will wake itself up and notify you.
+
+---
+
+# Matching behaviour and important quirks
+
+## Matching is deliberately conservative
+
+A missing match is better than attaching the wrong volume.
+
+If a store remains blank, inspect the Activity log and try the product manually with **Edit store URLs** or **Add from URL…**.
+
+## HTML import and live matching intentionally behave differently
+
+Wishlist HTML import only trusts exact same-store identity.
+
+It does **not** fuzzy-merge titles.
+
+Cross-store matching happens explicitly through **Find missing matches** or **Add from URL…**.
+
+This separation is deliberate.
+
+## Same-store IDs are important
+
+Two same-store products with different permanent IDs are assumed to be different products, even if their visible titles are very similar.
+
+Do not expect the program to merge those automatically.
+
+## Special editions are not interchangeable
+
+The matcher rejects incompatible edition markers such as `分冊版` versus the normal collected volume.
+
+This is a safety feature, not a failed fuzzy match.
+
+## Manual URLs are authoritative
+
+If you manually replace a store URL, that association becomes locked so ordinary matching does not silently replace your correction.
+
+Clearing the URL is different: it removes that store offer and its history.
+
+## Store pages can change
+
+All three storefront scrapers rely on public webpage markup.
+
+A site redesign can break:
+
+- wishlist HTML import;
+- title extraction;
+- prices;
+- points/coins;
+- covers;
+- search/matching.
+
+When this happens, check the **Activity** panel. The preferred failure mode is to leave data blank or report an error rather than guess.
+
+## A 403 is not necessarily a bad URL
+
+A storefront may sometimes reject an automated request even though the URL works in your browser.
+
+The matcher will log request failures in Activity and may continue trying other candidates.
+
+## BOOK☆WALKER prices
+
+The app stores domestic and exact tax-exclusive BOOK☆WALKER values separately when the site exposes both.
+
+Tax display mode changes the view; it does not make a new web request.
+
+## DMM points and BOOK☆WALKER coins
+
+Reward values can change independently from the cash price.
+
+They are informational and do not determine the **Lowest cash price** column.
+
+## DMM `/latest/`
+
+DMM can use `/latest/` as a moving alias. That is not a safe permanent identity.
+
+The scraper attempts to resolve it to the permanent product URL before saving.
+
+## Covers are not used to decide matches
+
+Cover-assisted matching is intentionally not implemented at this stage.
+
+A visually identical cover is not treated as identity proof.
+
+## Recorded low means recorded by this app
+
+A historical-low marker only refers to observations present in your database.
+
+It does not claim to know prices from before you started tracking the book.
+
+## Saved HTML can contain private account-page data
+
+Book Sale Notification does not intentionally import cookies or credentials from wishlist HTML, but the raw HTML file itself came from a signed-in browser page and may contain account-related page content.
+
+Do **not** share your saved raw wishlist HTML files publicly.
+
+Use the app's **Export shared book list…** feature when you want to share a list with another user.
+
+## Do not commit your database to GitHub
+
+The repository's `.gitignore` excludes `*.db`.
+
+Your personal `books.db` contains your watchlist/history and should stay local.
+
+---
+
+# Backups and recovery
+
+The app automatically creates a backup before risky operations such as:
+
+- deleting books;
+- store-match removal;
+- matching/reconciliation;
+- manual URL addition;
+- shared-list import;
+- Calibre bulk archive;
+- other bulk updates that can alter stored state.
+
+The newest five automatic backups are retained.
+
+For an extra manual copy, use:
+
+**Backup / Share → Save Backup As…**
+
+before large experiments or testing a new build.
+
+---
+
+# Sharing with another tester
+
+To send your list to somebody without sending your database or signed-in HTML:
+
+1. Open **Backup / Share**.
+2. Click **Export shared book list…**.
+3. Send the resulting `.bscshare` file.
+4. The recipient opens **Backup / Share → View / import shared book list…**.
+5. They get a read-only preview first.
+6. Nothing is imported until they explicitly click **Import All**.
+
+Price-history observations can be exchanged separately with `.bschistory` files.
+
+---
+
+# Building from source
+
+Python 3.12 is used by the GitHub Actions Windows build.
+
+Install dependencies:
+
+```powershell
+py -m pip install -r requirements.txt
+```
+
+Run the source version:
+
+```powershell
+py app.py
+```
+
+A helper batch file is also included for installing dependencies and another for building with PyInstaller.
+
+---
+
+# Building the Windows release on GitHub
+
+The repository contains:
+
+`.github/workflows/windows-release.yml`
+
+There are two normal ways to use it.
+
+## Test build
+
+Go to:
+
+**GitHub → Actions → Build Windows Release → Run workflow**
+
+This produces a downloadable Actions artifact without publishing a release.
+
+## Public release build
+
+Create/publish a version tag such as:
+
+`v1.7.1`
+
+The workflow builds the Windows package and attaches:
+
+`BookSaleNotification-Windows-1.7.1.zip`
+
+to the GitHub Release.
+
+The packaged application's updater uses published GitHub Releases, not ordinary workflow artifacts.
+
+---
+
+# Privacy and storefront access
+
+The live scraper uses public search/product pages.
+
+The app is not designed to store your store login credentials, account passwords or browser cookies.
+
+Wishlist import is performed from HTML files you explicitly save yourself.
+
+No guarantee is made that storefronts will keep the same public markup or permit the same request behaviour forever.
+
+---
+
+# Current limitations
+
+- Amazon support is disabled.
+- Matching is heuristic and intentionally conservative.
+- Cover images are not used for identity matching.
+- Storefront HTML/search markup can change without warning.
+- Some books may require manual URL correction.
+- Some product pages may temporarily return HTTP errors or block automated requests.
+- The Windows build is currently unsigned.
+- Background unattended sale checking / Windows sale notifications are not yet implemented in 1.7.1 despite the presence of related settings.
+- This is still a tester-oriented build; keep backups when experimenting.
+
+---
+
+# Feedback
+
+When reporting a problem, the most useful information is:
+
+1. app version;
+2. affected book title;
+3. affected store;
+4. the product URL, if known;
+5. what you expected;
+6. what happened instead;
+7. the relevant text from the **Activity** panel or Match Results report.
+
+Please avoid posting signed-in wishlist HTML publicly. If an HTML sample is required to debug a parser problem, review it for personal/account information first.
