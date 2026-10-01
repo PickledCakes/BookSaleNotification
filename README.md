@@ -223,3 +223,14 @@ Before publishing the repository, set `GITHUB_OWNER` and `GITHUB_REPO` near the 
 The packaged app's **Check for Updates** button checks the repository's latest published GitHub Release. If a newer version exists, it can download the Windows release ZIP, verify the GitHub-provided SHA-256 digest when available, close the app, replace the application files, and restart it.
 
 Source builds intentionally do not self-replace.
+
+
+## 1.7.1
+- Added **Add from URL…** for manual entry without exporting wishlist HTML.
+- Paste a BookLive, BOOK☆WALKER, or DMM Books product URL.
+- The pasted product is fetched first and used as the authoritative title/author anchor.
+- The app then searches both other stores and fetches matched product pages so current price, rewards/tax data, URLs, IDs, author metadata, and available cover metadata are populated before the book is written to the list.
+- All three stores are attempted before anything is saved.
+- Manual URL add is an explicit cross-store reconciliation path and does not change the conservative same-store-only behavior of wishlist HTML imports.
+- Exact existing product identities are reused instead of creating duplicates.
+- Different same-store product identities are never silently replaced.
