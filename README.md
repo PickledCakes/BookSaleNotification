@@ -8,7 +8,7 @@ A Windows desktop app for keeping a personal Japanese ebook watchlist across:
 
 The app imports books from saved wishlist HTML or from a single product URL, tries to match the same volume across the other supported stores, records prices over time, and gives you one place to compare the current cash price.
 
-> **Current version: 1.7.1**
+> **Current version: 1.7.2**
 >
 > Amazon is intentionally disabled for now.
 
@@ -688,3 +688,13 @@ When reporting a problem, the most useful information is:
 7. the relevant text from the **Activity** panel or Match Results report.
 
 Please avoid posting signed-in wishlist HTML publicly. If an HTML sample is required to debug a parser problem, review it for personal/account information first.
+
+
+## 1.7.2
+
+- Added an in-app **English / 日本語** UI toggle. The selected language is saved and restored on the next launch.
+- Japanese mode translates the main window, table headings, tabs, buttons, Settings, backup/share dialogs, manual URL add, update dialogs, recovery dialogs, common message boxes and file-picker labels.
+- The diagnostic Activity log may still contain technical English from the live storefront scrapers.
+- Fixed the no-cover table layout: rows no longer collapse to a single 24 px line while price/timestamp cells contain multiple lines.
+- When covers are hidden, book titles are wrapped to the visible Book column width and the table row height expands to fit the tallest wrapped visible title, while still reserving room for two-line price/timestamp cells.
+- Tk's Treeview uses one row height for the whole table, so all currently visible rows share the calculated height rather than having independent Excel-style row heights.
