@@ -620,21 +620,50 @@ class Amazon(Provider):
         return None,""
 
     def _kindle_swatch_price(self,soup,html):
-        """Read the selected Kindle-format price without touching other formats."""
+        """Read the Kindle purchase price from the row explicitly labelled Kindle版."""
+        # Current Amazon.co.jp markup literally labels the format row:
+        #   <span aria-label="Kindle版 (電子書籍) 形式:">...</span>
+        # and places the cash value beside it in:
+        #   <span class="... ebook-price-value" aria-label="￥396">￥396</span>
+        # Follow that semantic label first instead of depending on a particular row id.
+        label=soup.find("span",attrs={"aria-label":re.compile(r"Kindle版.*形式",re.I)})
+        if label:
+            node=label
+            for _ in range(7):
+                node=node.parent
+                if not node:break
+                price_node=node.select_one(".slot-price .ebook-price-value[aria-label], .slot-price [aria-label^='￥'], .slot-price [aria-label^='¥']")
+                if price_node:
+                    raw=(price_node.get("aria-label") or price_node.get_text(" ",strip=True) or "").strip()
+                    value=yen_money(raw)
+                    if value is not None:
+                        return value,"Kindle版 labelled row",raw
+                # Don't climb all the way into a page-wide container.
+                classes=set(node.get("class") or []) if hasattr(node,"get") else set()
+                if "a-container" in classes:break
+
+        # Known Amazon Kindle swatch id, retained as a secondary path.
         kindle=soup.select_one("#tmm-grid-swatch-KINDLE")
         if kindle:
+            price_node=kindle.select_one(".slot-price .ebook-price-value[aria-label], .slot-price [aria-label^='￥'], .slot-price [aria-label^='¥']")
+            if price_node:
+                raw=(price_node.get("aria-label") or price_node.get_text(" ",strip=True) or "").strip()
+                value=yen_money(raw)
+                if value is not None:
+                    return value,"#tmm-grid-swatch-KINDLE labelled price",raw
             raw=nfkc(kindle.get_text(" ",strip=True))
             m=re.search(r"[¥￥]\s*([0-9][0-9,]*)",raw)
             if m:return int(m.group(1).replace(",","")),"#tmm-grid-swatch-KINDLE text",m.group(0)
 
-        # Fallback for malformed/odd Amazon HTML where BeautifulSoup does not build
-        # the same subtree. Stay inside a short window beginning at the Kindle swatch.
+        # Raw-HTML fallback: locate the Kindle-format label and only inspect the
+        # short block immediately following it for a yen-labelled price.
         decoded=html_lib.unescape(html)
-        m=re.search(r'id=["\']tmm-grid-swatch-KINDLE["\']',decoded,re.I)
+        m=re.search(r'aria-label=["\'][^"\']*Kindle版[^"\']*形式[^"\']*["\']',decoded,re.I)
         if m:
-            chunk=nfkc(decoded[m.start():m.start()+12000])
-            pm=re.search(r"[¥￥]\s*([0-9][0-9,]*)",chunk)
-            if pm:return int(pm.group(1).replace(",","")),"raw Kindle swatch",pm.group(0)
+            chunk=nfkc(decoded[m.start():m.start()+5000])
+            pm=re.search(r'aria-label=["\'][¥￥]\s*([0-9][0-9,]*)["\']',chunk,re.I)
+            if pm:return int(pm.group(1).replace(",","")),"raw Kindle版 labelled row",pm.group(0)
+
         return None,"",""
 
     def search(self,title,author=""):
