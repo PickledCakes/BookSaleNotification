@@ -2416,6 +2416,66 @@ class App(tk.Tk):
         suffix=("\n\n"+"\n".join(extra)) if extra else ""
         messagebox.showinfo("History imported",f"Merged {n} historical observations.{suffix}")
 
+    def _notify_bookwalker_expired(self):
+        msg="Your BOOK☆WALKER session has expired. Sign in again to continue receiving your account-specific coin amounts."
+        self.log("[BOOK☆WALKER] Saved session expired; sign in again for coin values")
+        try:
+            if self.state()=="withdrawn" and self._ensure_tray_icon():
+                self._tray_icon.notify(msg,"BOOK☆WALKER sign-in required")
+                return
+        except Exception:
+            pass
+        messagebox.showwarning("BOOK☆WALKER sign-in required",msg)
+
+    def _run_bookwalker_health_check(self,status_var=None,notify_expiry=False):
+        previous=self.db.get_setting(
+            "bookwalker_session_state","valid" if load_bookwalker_cookies() else "never")
+        if status_var is not None:status_var.set("Checking…")
+        def work():
+            status,detail=check_bookwalker_session()
+            def finish():
+                if status=="signed_in":
+                    self.db.set_setting("bookwalker_session_state","valid")
+                    if status_var is not None:status_var.set("Signed in")
+                    self.log("[BOOK☆WALKER] Login health check: signed in")
+                elif status=="signed_out":
+                    self.db.set_setting("bookwalker_session_state","expired" if previous=="valid" else "never")
+                    if status_var is not None:
+                        status_var.set("Session expired" if previous=="valid" else "Not signed in")
+                    self.log("[BOOK☆WALKER] Login health check: signed out")
+                    if notify_expiry and previous=="valid":
+                        self._notify_bookwalker_expired()
+                else:
+                    if status_var is not None:status_var.set("Could not check")
+                    self.log(f"[BOOK☆WALKER] Login health check unavailable: {detail}")
+            self.after(0,finish)
+        threading.Thread(target=work,daemon=True).start()
+
+    def _scheduled_bookwalker_health_check(self):
+        state=self.db.get_setting(
+            "bookwalker_session_state","valid" if load_bookwalker_cookies() else "never")
+        if state=="valid" and load_bookwalker_cookies():
+            self._run_bookwalker_health_check(notify_expiry=True)
+        self.after(6*60*60*1000,self._scheduled_bookwalker_health_check)
+
+    def _run_dmm_health_check(self,status_var=None):
+        if status_var is not None:status_var.set("Checking…")
+        def work():
+            status,detail=check_dmm_access()
+            def finish():
+                if status=="available":
+                    text="Japanese access available"
+                    self.log("[DMM] Health check: Japanese access available")
+                elif status=="jp_required":
+                    text="Japanese IP required"
+                    self.log("[DMM] Health check: Japanese IP required")
+                else:
+                    text="Could not check"
+                    self.log(f"[DMM] Health check unavailable: {detail}")
+                if status_var is not None:status_var.set(text)
+            self.after(0,finish)
+        threading.Thread(target=work,daemon=True).start()
+
     def _start_bookwalker_signin(self,status_var=None,button=None):
         if os.name!="nt":
             messagebox.showerror("BOOK☆WALKER","BOOK☆WALKER sign-in is currently available in the Windows build.")
@@ -2446,7 +2506,8 @@ class App(tk.Tk):
                     try: button.configure(state="normal")
                     except Exception: pass
                 if code==0 and cookies:
-                    if status_var is not None: status_var.set("Saved BOOK☆WALKER session")
+                    if status_var is not None: status_var.set("Signed in")
+                    self.db.set_setting("bookwalker_session_state","valid")
                     try:
                         delay=float(self.db.get_setting("request_delay_seconds","1.25"))
                         self.providers=live_providers(delay,self.log,cookies)
@@ -2469,7 +2530,7 @@ class App(tk.Tk):
         threading.Thread(target=wait_for_login,daemon=True).start()
 
     def settings_dialog(self):
-        w=tk.Toplevel(self); w.title("Settings"); w.geometry("620x900"); w.resizable(False,False)
+        w=tk.Toplevel(self); w.title("Settings"); w.geometry("640x940"); w.resizable(False,False)
         f=ttk.Frame(w,padding=16); f.pack(fill="both",expand=True)
         notify=tk.StringVar(value=self.db.get_setting("notification_rule","any_sale"))
         threshold=tk.StringVar(value=self.db.get_setting("deal_threshold","20"))
@@ -2487,6 +2548,7 @@ class App(tk.Tk):
         retention=tk.StringVar(value=self.db.get_setting("trash_retention_days","14"))
         check_updates=tk.BooleanVar(value=self.db.get_setting("check_updates_on_startup","1")=="1")
         use_prerelease=tk.BooleanVar(value=self.db.get_setting("use_prerelease_updates","0")=="1")
+        close_behavior=tk.StringVar(value=self.db.get_setting("close_button_behavior","tray"))
         ttk.Label(f,text="Notification rule",font=("Segoe UI",10,"bold")).pack(anchor="w")
         for text,val in [("Any sale","any_sale"),("Lowest recorded price","historical_low"),("Good deal","good_deal")]:
             ttk.Radiobutton(f,text=text,variable=notify,value=val).pack(anchor="w")
@@ -2527,13 +2589,23 @@ class App(tk.Tk):
         ttk.Checkbutton(f,text="BookLive",variable=store_booklive,command=apply_store_settings).pack(anchor="w")
         ttk.Checkbutton(f,text="BOOK☆WALKER",variable=store_bookwalker,command=apply_store_settings).pack(anchor="w")
         bw_login=ttk.Frame(f); bw_login.pack(fill="x",padx=(22,0),pady=(2,5))
-        bw_status=tk.StringVar(value=("Saved BOOK☆WALKER session" if load_bookwalker_cookies()
-                                      else "Not signed in — cash prices still work; coins are hidden."))
+        bw_state=self.db.get_setting("bookwalker_session_state","valid" if load_bookwalker_cookies() else "never")
+        bw_initial=("Signed in (last known)" if bw_state=="valid" and load_bookwalker_cookies()
+                    else "Session expired" if bw_state=="expired"
+                    else "Not signed in — cash prices still work; coins are hidden.")
+        bw_status=tk.StringVar(value=bw_initial)
         bw_button=ttk.Button(bw_login,text="Sign in to BOOK☆WALKER")
         bw_button.pack(side="left")
-        ttk.Label(bw_login,textvariable=bw_status,wraplength=330).pack(side="left",padx=(10,0))
+        ttk.Button(bw_login,text="Check now",
+                   command=lambda:self._run_bookwalker_health_check(bw_status,notify_expiry=True)).pack(side="left",padx=(6,0))
+        ttk.Label(bw_login,textvariable=bw_status,wraplength=250).pack(side="left",padx=(10,0))
         bw_button.configure(command=lambda:self._start_bookwalker_signin(bw_status,bw_button))
+
         ttk.Checkbutton(f,text="DMM",variable=store_dmm,command=apply_store_settings).pack(anchor="w")
+        dmm_health=ttk.Frame(f); dmm_health.pack(fill="x",padx=(22,0),pady=(2,5))
+        dmm_status=tk.StringVar(value="Not checked")
+        ttk.Button(dmm_health,text="Check now",command=lambda:self._run_dmm_health_check(dmm_status)).pack(side="left")
+        ttk.Label(dmm_health,textvariable=dmm_status,wraplength=330).pack(side="left",padx=(10,0))
         ttk.Checkbutton(f,text="Amazon (HTML import + direct price refresh only)",variable=store_amazon,command=apply_store_settings).pack(anchor="w")
         row2=ttk.Frame(f); row2.pack(fill="x",pady=8)
         ttk.Label(row2,text="Automatic update interval (hours):").pack(side="left")
@@ -2547,6 +2619,10 @@ class App(tk.Tk):
                         variable=use_prerelease).pack(anchor="w",pady=(2,0))
         ttk.Label(f,text="Off = stable releases only. Test builds may contain unfinished fixes.",
                   wraplength=500).pack(anchor="w",pady=(0,4))
+        close_row=ttk.Frame(f); close_row.pack(fill="x",pady=(3,2))
+        ttk.Label(close_row,text="Close button (X):").pack(side="left")
+        ttk.Radiobutton(close_row,text="Minimize to system tray",variable=close_behavior,value="tray").pack(side="left",padx=(10,0))
+        ttk.Radiobutton(close_row,text="Exit application",variable=close_behavior,value="exit").pack(side="left",padx=(10,0))
         ttk.Separator(f).pack(fill="x",pady=(8,6))
         ar=ttk.Frame(f); ar.pack(fill="x"); ttk.Label(ar,text="Appearance:").pack(side="left")
         appearance_values=("system","light","dark") if UI_LANG!="ja" else ("システム","ライト","ダーク")
@@ -2569,6 +2645,7 @@ class App(tk.Tk):
             self.db.set_setting("request_delay_seconds",reqdelay.get())
             self.db.set_setting("check_updates_on_startup","1" if check_updates.get() else "0")
             self.db.set_setting("use_prerelease_updates","1" if use_prerelease.get() else "0")
+            self.db.set_setting("close_button_behavior",close_behavior.get())
             chosen_appearance=appearance_display.get(); appearance.set({"システム":"system","ライト":"light","ダーク":"dark"}.get(chosen_appearance,chosen_appearance))
             self.db.set_setting("appearance",appearance.get()); self.db.set_setting("trash_retention_days",retention.get())
             self.apply_theme()
