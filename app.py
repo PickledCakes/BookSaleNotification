@@ -32,8 +32,8 @@ try:
 except ImportError:
     Figure=FigureCanvasTkAgg=NavigationToolbar2Tk=mdates=MultipleLocator=FuncFormatter=None
 
-APP_NAME = "Book Sale Notification 1.9.1-beta.5"
-APP_VERSION = "1.9.1-beta.5"
+APP_NAME = "Book Sale Notification 1.9.1-beta.6"
+APP_VERSION = "1.9.1-beta.6"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -818,6 +818,71 @@ def parse_bookwalker(soup):
 
 def parse_dmm(soup):
     out = []
+
+    # Current DMM "あとで買う" list layout (2026+):
+    # <ul class="fn-bookmarkList"><li class="fn-listContainer ...">...</li></ul>
+    for row in soup.select("ul.fn-bookmarkList li.fn-listContainer"):
+        a = row.select_one(".tmb a[href*='book.dmm.com/product/']")
+        if not a:
+            a = row.select_one("a[href*='book.dmm.com/product/']")
+        if not a:
+            continue
+        url = canonical_url(a.get("href",""))
+        mid = re.search(r'/product/(\d+)/([^/?#]+)', url, re.I)
+        if not mid:
+            continue
+
+        title_node=row.select_one(".tmb .txt")
+        title=(title_node.get_text(" ",strip=True) if title_node else "").strip()
+        if not title:
+            img=row.select_one(".tmb img[alt]")
+            if img:title=(img.get("alt") or "").strip()
+        if not title:
+            title=a.get_text(" ",strip=True)
+        if not title:
+            continue
+
+        p=None
+        price_node=row.select_one(".value .price .price__val") or row.select_one(".price__val")
+        if price_node:
+            m=re.search(r'([0-9][0-9,]*)',price_node.get_text(" ",strip=True))
+            if m:p=int(m.group(1).replace(",",""))
+        if p is None:
+            checkbox=row.select_one("input.fn-bookmarkItemCheck[param-price]")
+            if checkbox:
+                m=re.search(r'([0-9][0-9,]*)',checkbox.get("param-price",""))
+                if m:p=int(m.group(1).replace(",",""))
+
+        author=""
+        author_node=row.select_one(".m-bookmarkItem__linkAuthor")
+        if author_node:
+            names=[x.get_text(" ",strip=True) for x in author_node.select("a")
+                   if x.get_text(" ",strip=True)]
+            author=" / ".join(dict.fromkeys(names))
+            if not author:
+                author=author_node.get_text(" ",strip=True).replace("他","").strip()
+
+        rp=None
+        campaign=row.select_one(".m-bookmarkItemCampaignText")
+        campaign_text=campaign.get_text(" ",strip=True) if campaign else ""
+        m=re.search(r'([0-9]+(?:\.[0-9]+)?)\s*%\s*pt還元',campaign_text,re.I)
+        if m:rp=float(m.group(1))
+
+        cover=""
+        img=row.select_one(".m-bookImage--bookmark img[src]") or row.select_one(".tmb img[src]")
+        if img:cover=(img.get("src") or "").strip()
+
+        labels=" ".join(x.get_text(" ",strip=True) for x in row.select(".m-bookProductLabel"))
+        flags=[]
+        if "予約" in labels:flags.append("preorder")
+        if "無料" in labels:flags.append("free")
+        if "値引" in labels or "セール" in labels:flags.append("sale")
+
+        sid=f"{mid.group(1)}:{mid.group(2)}"
+        out.append(Offer("DMM",title,url,p,reward_pct=rp,author=author,
+                         cover_url=cover,store_id=sid,flags=",".join(flags)))
+
+    # Legacy DMM table layout retained for older saved HTML exports.
     for row in soup.select("table.fn-bookmarkList tr.fn-listContainer"):
         a = row.select_one("a.m-bookmarkListTitleSection__titleContainer[href*='book.dmm.com/product/']")
         if not a: continue
@@ -851,7 +916,7 @@ def detect_store(soup, filename=""):
         return "Amazon"
     if "amazon" in hay or soup.select_one(".g-item-sortable"): return "Amazon"
     if "bookwalker" in hay or soup.select_one(".bw_checklist_unit"): return "BOOK☆WALKER"
-    if "dmm" in hay or soup.select_one("table.fn-bookmarkList"): return "DMM"
+    if "dmm" in hay or soup.select_one("table.fn-bookmarkList") or soup.select_one("ul.fn-bookmarkList li.fn-listContainer"): return "DMM"
     if "ブックライブ" in hay or "booklive" in hay or soup.select_one("ul.save_list"): return "BookLive"
     return None
 
@@ -2739,6 +2804,15 @@ class App(tk.Tk):
                 if ref is not None and price is not None and ref>price:
                     lines.append(f"{(ref-price)*100/ref:.0f}% off")
                 ann.xy=(mdates.date2num(p["_dt"]),price)
+                # Keep the tooltip inside the axes: flip left/right and up/down
+                # according to the hovered point's on-screen position.
+                bbox=ax.get_window_extent()
+                px,py=ax.transData.transform((mdates.date2num(p["_dt"]),price))
+                horizontal=-14 if px > bbox.x0 + bbox.width*0.72 else 14
+                vertical=-14 if py > bbox.y0 + bbox.height*0.78 else 14
+                ann.set_position((horizontal,vertical))
+                ann.set_ha("right" if horizontal<0 else "left")
+                ann.set_va("top" if vertical<0 else "bottom")
                 ann.set_text("\n".join(lines)); ann.set_visible(True)
                 canvas.draw_idle(); return
             if ann.get_visible():
