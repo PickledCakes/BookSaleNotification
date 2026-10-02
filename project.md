@@ -514,3 +514,14 @@ For 1.9:
 - Multiple store events for the same book count as one book.
 - Settings includes a three-book grouped-notification simulation for testing without changing price/history data.
 - This is phase 1 of the notification upgrade. Sale highlighting/filtering and an in-app sale notification center are planned for later phases after beta.1 testing.
+
+### beta.2 — Sale state and notification center
+
+- Adds persistent per-offer current-sale state with remembered reference price, sale price, detection time, last-seen time and end time.
+- Existing offers with explicit list_price > price are backfilled as active sales on upgrade; migrated events are marked read.
+- Main table highlights books with an active sale.
+- Active-sale store cells are prefixed with SALE; the cheapest current store gets a star marker. If the cheapest store itself is not the sale store it is marked CHEAPEST.
+- Adds **Show only books on sale** filter.
+- Adds a top-level **Sales** button with unread book count.
+- Sales window groups events by book newest-first, supports Mark selected as read / Mark all as read, shows active vs ended sales, and presents one button per currently-on-sale store with cheapest store called out.
+- Grouped desktop notifications now include up to three book titles plus a remaining-book count and direct users to the Sales window for details.
