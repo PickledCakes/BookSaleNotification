@@ -557,3 +557,15 @@ For 1.9:
 - The updater validates that the downloaded package contains the expected executable and that the updated executable exists after copy.
 - A successful update writes an install marker before relaunch; the new app logs that marker and its running APP_VERSION on startup.
 - Because users still on beta.2 are running beta.2's old updater code, the safest one-time path to beta.4 is manual ZIP replacement after fully exiting every old instance. Once beta.4 is installed, subsequent in-app updates use the hardened updater.
+
+### beta.5 — Price-history cleanup
+
+- Price History becomes event-based rather than refresh-based.
+- One-time migration compacts each offer's existing historical rows by keeping the first observation and later rows only when cash price or list/regular price changes.
+- Before deleting duplicate historical rows, the migration creates an automatic full DB backup under the normal backups folder and records a one-time marker.
+- Future successful refreshes always update offers.observed_at, but price_history receives a new row only when cash price or list price changed from the most recent saved history event.
+- Reward-only changes no longer create price-history rows; current offer rewards are still refreshed normally.
+- Dark-mode Matplotlib legend and tooltip colors are themed for readability.
+- Hover now finds the nearest visible graph point in screen pixels, fixing the single-data-point case and making interaction more forgiving generally.
+- History Data shows the persisted price-change events directly rather than repeated unchanged refresh observations.
+- Data table supports multi-select **Delete selected records** with confirmation and an automatic DB backup. Deletion removes only history rows, then redraws the graph/recalculates stats; current offers.price is untouched.
