@@ -7,7 +7,7 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **DMM Books**
 - **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.8.4**
+> Current version: **1.8.5**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
@@ -18,6 +18,8 @@ Book Sale Notification keeps one combined watchlist, matches the same volume acr
 - `電子書籍の司書さん` imports support both the card/list layout and the **一覧表** table layout. Table-layout imports may not contain prices; those can be filled later with **Update prices**.
 - Add individual BookLive / BOOK☆WALKER / DMM / Amazon books by product URL.
 - Match the same book across supported stores.
+- Canonical titles prefer **BookLive → DMM → BOOK☆WALKER → Amazon**.
+- Cover source priority is **BookLive → Amazon → DMM → BOOK☆WALKER**.
 - Compare current cash prices in one table.
 - Show DMM points, BOOK☆WALKER coins, and Amazon points separately.
 - Keep local price history and recorded lows.
