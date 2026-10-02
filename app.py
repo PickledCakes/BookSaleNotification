@@ -23,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.9.0-beta.1"
-APP_VERSION = "1.9.0-beta.1"
+APP_NAME = "Book Sale Notification 1.9.0-beta.2"
+APP_VERSION = "1.9.0-beta.2"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -89,9 +89,9 @@ def load_bookwalker_cookies():
 def bookwalker_login_helper():
     """Run the real BOOK☆WALKER site in a persistent Edge WebView2 profile.
 
-    This helper is launched as a second process so pywebview can own that process's
-    main GUI thread without conflicting with Tk. The app never sees the password;
-    after BOOK☆WALKER confirms login, only its session cookies are exported.
+    pywebview owns this helper process's GUI thread. A separate monitor thread
+    checks the authenticated session and closes the window once BOOK☆WALKER
+    confirms login. The app never receives or stores the user's password.
     """
     try:
         if BW_LOGIN_ERROR_PATH.exists(): BW_LOGIN_ERROR_PATH.unlink()
@@ -99,55 +99,71 @@ def bookwalker_login_helper():
         pass
     try:
         import webview
+        import requests as _requests
         result={"success":False}
 
-        def capture(window):
-            try:
-                current=window.get_current_url() or ""
-                host=(urlparse(current).hostname or "").lower()
-                if host!="bookwalker.jp" and not host.endswith(".bookwalker.jp"):
-                    return False
-                signed_in=bool(window.evaluate_js(
-                    "typeof window.BW_IS_LOGIN !== 'undefined' && window.BW_IS_LOGIN === true"))
-                if not signed_in:
-                    return False
-                records=[]
-                for jar in window.get_cookies() or []:
-                    try:
-                        items=jar.items()
-                    except Exception:
+        def cookie_records(window):
+            records=[]
+            for jar in window.get_cookies() or []:
+                try:
+                    items=jar.items()
+                except Exception:
+                    continue
+                for name,morsel in items:
+                    domain=(morsel["domain"] or ".bookwalker.jp").strip()
+                    if "bookwalker.jp" not in domain.lower():
                         continue
-                    for name,morsel in items:
-                        domain=(morsel["domain"] or ".bookwalker.jp").strip()
-                        if "bookwalker.jp" not in domain.lower():
-                            continue
-                        records.append({"name":name,"value":morsel.value,
-                                        "domain":domain,"path":(morsel["path"] or "/")})
-                if not records:
-                    return False
-                save_bookwalker_cookies(records)
-                result["success"]=True
-                return True
+                    records.append({"name":name,"value":morsel.value,
+                                    "domain":domain,"path":(morsel["path"] or "/")})
+            return records
+
+        def session_is_logged_in(records):
+            if not records:return False
+            s=_requests.Session()
+            s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36",
+                              "Accept-Language":"ja-JP,ja;q=0.9,en;q=0.6"})
+            for item in records:
+                try:
+                    s.cookies.set(item["name"],item["value"],
+                                  domain=item.get("domain") or ".bookwalker.jp",
+                                  path=item.get("path") or "/")
+                except Exception:
+                    pass
+            try:
+                r=s.get("https://bookwalker.jp/",timeout=12,allow_redirects=True)
+                return bool(re.search(r"BW_IS_LOGIN\s*=\s*true",r.text,re.I))
             except Exception:
                 return False
 
-        def on_loaded(window):
-            if capture(window):
-                # Login is complete; close automatically so the user does not have
-                # to understand or manually export cookies.
-                window.destroy()
-
-        def on_closing(window=None):
-            if window is not None:
-                capture(window)
+        def monitor(window):
+            # webview.start(func, ...) runs this logic in its own worker thread.
+            # Do not perform cookie/JS calls from a synchronous closing handler:
+            # Edge WebView2 can deadlock while the native window is shutting down.
+            while True:
+                try:
+                    current=window.get_current_url() or ""
+                except Exception:
+                    break
+                try:
+                    host=(urlparse(current).hostname or "").lower()
+                    if host=="bookwalker.jp" or host.endswith(".bookwalker.jp"):
+                        records=cookie_records(window)
+                        if session_is_logged_in(records):
+                            save_bookwalker_cookies(records)
+                            result["success"]=True
+                            time.sleep(0.2)
+                            window.destroy()
+                            return
+                except Exception:
+                    pass
+                time.sleep(1.0)
 
         webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"]=False
         window=webview.create_window(
             "BOOK☆WALKER Sign In — sign in normally; this window closes when connected",
             "https://bookwalker.jp/",width=1050,height=780,resizable=True)
-        window.events.loaded += on_loaded
-        window.events.closing += on_closing
-        webview.start(gui="edgechromium",private_mode=False,storage_path=str(BW_WEBVIEW_DIR))
+        webview.start(monitor,window,gui="edgechromium",private_mode=False,
+                      storage_path=str(BW_WEBVIEW_DIR))
         return 0 if result["success"] else 2
     except Exception as e:
         try:
