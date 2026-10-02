@@ -7,7 +7,7 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **DMM Books**
 - **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.9.1-beta.4**
+> Current version: **1.9.1-beta.5**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
@@ -44,7 +44,10 @@ Book Sale Notification keeps one combined watchlist, matches the same volume acr
 - Main-table column widths are remembered and auto-expand when visible content would otherwise be clipped.
 - Only one application instance can run; repeat launches restore/focus the existing app, and major utility windows are single-instance.
 - Updater now detects duplicate running copies from the same install folder, aborts with a visible error instead of silently partially updating, and records a successful install marker before relaunch.
-- Price History uses an interactive step graph with time ranges, enabled-store filtering, per-store visibility toggles, hover details, a summary table, and a raw/change-only Data tab.
+- Price History uses an interactive step graph with time ranges, enabled-store filtering, per-store visibility toggles, hover details, a summary table, and a Data tab.
+- History now stores price-change events only. Existing repeated unchanged observations are compacted once on upgrade after an automatic database backup, and future unchanged refreshes do not add rows.
+- History graph hover uses nearest-point snapping so a single recorded observation is still inspectable, and dark-mode legend/tooltips use readable themed colors.
+- History Data supports deleting selected historical records with confirmation and an automatic backup; deleting history does not alter the current store price.
 
 Matching is intentionally conservative. It is better for the app to leave a store blank than attach the wrong volume or edition.
 
