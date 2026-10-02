@@ -32,8 +32,8 @@ try:
 except ImportError:
     Figure=FigureCanvasTkAgg=NavigationToolbar2Tk=mdates=MultipleLocator=FuncFormatter=None
 
-APP_NAME = "Book Sale Notification 1.9.1-beta.3"
-APP_VERSION = "1.9.1-beta.3"
+APP_NAME = "Book Sale Notification 1.9.1-beta.4"
+APP_VERSION = "1.9.1-beta.4"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -1399,6 +1399,15 @@ class App(tk.Tk):
         self._restore_main_pane()
         self._resize_table_columns()
         self.refresh()
+        if getattr(sys,"frozen",False):
+            try:
+                marker_path=Path(sys.executable).parent/".update-installed"
+                if marker_path.exists():
+                    installed=marker_path.read_text(encoding="utf-8-sig").strip()
+                    marker_path.unlink(missing_ok=True)
+                    self.log(f"[Updater] Installed update marker: {installed}; running {APP_VERSION}")
+            except Exception as e:
+                self.log(f"[Updater] Could not read update marker: {e}")
         if self.db.get_setting("main_window_state","normal")=="zoomed":
             self.after_idle(lambda:self.state("zoomed"))
         if self.db.get_setting("check_updates_on_startup","1")=="1":
@@ -3697,21 +3706,66 @@ class App(tk.Tk):
                     if actual.lower()!=digest.split(":",1)[1].lower(): raise RuntimeError("SHA-256 verification failed.")
                 exe=Path(sys.executable)
                 ps=tmp/"apply_update.ps1"
-                script = """$pidToWait = __PID__
+                script = """$ErrorActionPreference = 'Stop'
+$pidToWait = __PID__
 $zip = '__ZIP__'
 $install = '__INSTALL__'
 $exe = '__EXE__'
-while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }
-$stage = Join-Path '__TMP__' 'stage'
-Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
-$items = Get-ChildItem -LiteralPath $stage
-$src = $stage
-if ($items.Count -eq 1 -and $items[0].PSIsContainer) { $src = $items[0].FullName }
-Copy-Item -Path (Join-Path $src '*') -Destination $install -Recurse -Force
-Start-Process -FilePath (Join-Path $install $exe) -WorkingDirectory $install
+$expectedVersion = '__VERSION__'
+$log = Join-Path '__TMP__' 'update.log'
+
+function Log($msg) { Add-Content -LiteralPath $log -Value ((Get-Date -Format s) + "  " + $msg) }
+
+try {
+    Log "Waiting for source process PID $pidToWait"
+    while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 250 }
+
+    $targetExe = [System.IO.Path]::GetFullPath((Join-Path $install $exe))
+    $deadline = (Get-Date).AddSeconds(20)
+    do {
+        $others = @(Get-CimInstance Win32_Process -Filter "Name='$exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.ExecutablePath -and ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq $targetExe)
+        })
+        if ($others.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    if ($others.Count -gt 0) {
+        throw "Another Book Sale Notification instance from this install folder is still running. Close it from the system tray and run the update again."
+    }
+
+    $stage = Join-Path '__TMP__' 'stage'
+    if (Test-Path $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
+    $items = @(Get-ChildItem -LiteralPath $stage)
+    $src = $stage
+    if ($items.Count -eq 1 -and $items[0].PSIsContainer) { $src = $items[0].FullName }
+
+    $sourceExe = Join-Path $src $exe
+    if (-not (Test-Path -LiteralPath $sourceExe)) { throw "Downloaded update does not contain $exe." }
+
+    Log "Copying update into $install"
+    Copy-Item -Path (Join-Path $src '*') -Destination $install -Recurse -Force
+
+    if (-not (Test-Path -LiteralPath $targetExe)) { throw "Updated executable was not found after copying." }
+    $marker = Join-Path $install '.update-installed'
+    Set-Content -LiteralPath $marker -Value $expectedVersion -Encoding UTF8
+    Log "Update copy completed: $expectedVersion"
+    Start-Sleep -Milliseconds 500
+    Start-Process -FilePath $targetExe -WorkingDirectory $install
+}
+catch {
+    Log ("UPDATE FAILED: " + $_.Exception.Message)
+    Add-Type -AssemblyName PresentationFramework
+    [System.Windows.MessageBox]::Show(
+        "Book Sale Notification could not finish the update." + [Environment]::NewLine + [Environment]::NewLine + $_.Exception.Message +
+        [Environment]::NewLine + [Environment]::NewLine + "Please close every Book Sale Notification window/tray icon and try again.",
+        "Update failed", "OK", "Error"
+    ) | Out-Null
+}
 """
                 esc=lambda x:str(x).replace("'","''")
-                script=script.replace("__PID__",str(os.getpid())).replace("__ZIP__",esc(zpath)).replace("__INSTALL__",esc(exe.parent)).replace("__EXE__",esc(exe.name)).replace("__TMP__",esc(tmp))
+                script=script.replace("__PID__",str(os.getpid())).replace("__ZIP__",esc(zpath)).replace("__INSTALL__",esc(exe.parent)).replace("__EXE__",esc(exe.name)).replace("__TMP__",esc(tmp)).replace("__VERSION__",esc(version))
                 ps.write_text(script,encoding="utf-8")
                 subprocess.Popen(["powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-File",str(ps)],
                                  creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
