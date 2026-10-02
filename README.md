@@ -7,7 +7,7 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **DMM Books**
 - **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.8.1**
+> Current version: **1.8.2**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
@@ -170,6 +170,7 @@ Calibre CSV sync can archive books you already own when the `identifiers` column
 - `bl:<title_id>:<vol_no>`
 - `bw:<BOOKWALKER product UUID>`
 - `dmm:<DMM content ID>`
+- `amazon_jp:<Amazon ASIN>`
 
 Calibre sync does not use fuzzy title matching.
 
