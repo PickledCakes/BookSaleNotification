@@ -23,12 +23,17 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.8.2"
-APP_VERSION = "1.8.2"
+APP_NAME = "Book Sale Notification 1.8.3"
+APP_VERSION = "1.8.3"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
 UPDATE_ASSET_PREFIX = "BookSaleNotification-Windows-"
+MAIN_DEFAULT_GEOMETRY = "1420x780"
+MAIN_MIN_WIDTH = 1320
+MAIN_MIN_HEIGHT = 640
+TABLE_PANE_MIN_WIDTH = 1000
+ACTIVITY_PANE_MIN_WIDTH = 250
 def app_data_dir():
     if getattr(sys,"frozen",False):
         base=Path(os.environ.get("LOCALAPPDATA",str(Path.home()/"AppData"/"Local")))
@@ -853,14 +858,61 @@ class DB:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.geometry("1420x780"); self.minsize(1000,560)
         self.db=DB()
+        self.minsize(MAIN_MIN_WIDTH,MAIN_MIN_HEIGHT)
+        self._restore_window_geometry()
+        self.protocol("WM_DELETE_WINDOW",self._on_close)
+
         global UI_LANG
         UI_LANG=self.db.get_setting("ui_language","en")
         self.title(APP_NAME)
         self.current_list_id=1; self.archived_view=False
         self.providers=live_providers(float(self.db.get_setting("request_delay_seconds","1.25")), self.log)
-        self._build(); self.apply_theme(); self.refresh()
+        self._build()
+        self.apply_theme()
+        # Let Tk finish laying out the panes before calculating column widths/wrapping.
+        self.update_idletasks()
+        self._restore_main_pane()
+        self._resize_table_columns()
+        self.refresh()
+        if self.db.get_setting("main_window_state","normal")=="zoomed":
+            self.after_idle(lambda:self.state("zoomed"))
+
+    def _restore_window_geometry(self):
+        saved=self.db.get_setting("main_window_geometry",MAIN_DEFAULT_GEOMETRY)
+        m=re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)",saved or "")
+        if not m:
+            self.geometry(MAIN_DEFAULT_GEOMETRY)
+            return
+        w=max(MAIN_MIN_WIDTH,int(m.group(1)))
+        h=max(MAIN_MIN_HEIGHT,int(m.group(2)))
+        x=int(m.group(3)); y=int(m.group(4))
+        # Keep at least part of the title bar on the primary screen after monitor
+        # changes, while still allowing negative coordinates used by left-side monitors.
+        sw=max(1,self.winfo_screenwidth()); sh=max(1,self.winfo_screenheight())
+        if x>=sw-80: x=max(0,sw-w)
+        if y>=sh-50: y=max(0,sh-h)
+        self.geometry(f"{w}x{h}{x:+d}{y:+d}")
+
+    def _save_window_state(self):
+        try:
+            state=self.state()
+            # Save the normal geometry. When maximized, Windows/Tk may report the
+            # maximized rectangle; retaining the previous normal geometry is safer.
+            if state=="normal":
+                self.db.set_setting("main_window_geometry",self.geometry())
+            self.db.set_setting("main_window_state","zoomed" if state=="zoomed" else "normal")
+            if hasattr(self,"main_pane") and self.main_pane.winfo_exists():
+                total=self.main_pane.winfo_width()
+                sash=self.main_pane.sashpos(0)
+                if total>0 and sash>0:
+                    self.db.set_setting("main_activity_width",max(ACTIVITY_PANE_MIN_WIDTH,total-sash))
+        except Exception:
+            pass
+
+    def _on_close(self):
+        self._save_window_state()
+        self.destroy()
 
     def toggle_language(self):
         global UI_LANG
@@ -911,39 +963,116 @@ class App(tk.Tk):
                   "dmm":"DMM","amazon":"Amazon","lowest":"Lowest cash price","stores":"Matched"}
         widths={"title":500,"booklive":115,"bookwalker":135,"dmm":115,"amazon":115,"lowest":150,"stores":70}
 
-        # Main table and live activity console.  Create the final Treeview directly
-        # in table_frame so the scrollbar can never retain a callback to a destroyed widget.
-        pane=ttk.Panedwindow(self,orient="horizontal")
-        pane.pack(fill="both",expand=True,padx=10,pady=(0,8))
-        table_frame=ttk.Frame(pane); activity_frame=ttk.Frame(pane,width=390)
-        pane.add(table_frame,weight=4); pane.add(activity_frame,weight=1)
+        # Main table and live activity console. Keep enough width for the complete
+        # price table so the rightmost Matched column cannot disappear behind Activity.
+        self.main_pane=ttk.Panedwindow(self,orient="horizontal")
+        self.main_pane.pack(fill="both",expand=True,padx=10,pady=(0,8))
+        self.table_frame=ttk.Frame(self.main_pane)
+        self.activity_frame=ttk.Frame(self.main_pane,width=320)
+        self.main_pane.add(self.table_frame,weight=4)
+        self.main_pane.add(self.activity_frame,weight=1)
+        self.main_pane.bind("<Configure>",self._on_main_pane_configure,add="+")
 
-        self.tree=ttk.Treeview(table_frame,columns=cols,show="tree headings",selectmode="extended")
+        self.tree=ttk.Treeview(self.table_frame,columns=cols,show="tree headings",selectmode="extended")
         for c in cols:
             self.tree.heading(c,text=headings[c],command=lambda x=c:self.sort_by(x))
-            self.tree.column(c,width=widths[c],anchor="w" if c=="title" else "center")
+            self.tree.column(c,width=widths[c],minwidth=55,stretch=False,
+                             anchor="w" if c=="title" else "center")
+        self.tree.column("title",minwidth=190)
+        self.tree.column("lowest",minwidth=125)
+        self.tree.column("stores",minwidth=72)
         self.tree.heading("#0",text="Cover")
         self._cover_photos={}
         self.apply_cover_view()
         self.apply_store_columns()
-        sy=ttk.Scrollbar(table_frame,orient="vertical",command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sy.set)
-        self.tree.pack(side="left",fill="both",expand=True); sy.pack(side="right",fill="y")
+
+        sy=ttk.Scrollbar(self.table_frame,orient="vertical",command=self.tree.yview)
+        sx=ttk.Scrollbar(self.table_frame,orient="horizontal",command=self.tree.xview)
+        self.tree.configure(yscrollcommand=sy.set,xscrollcommand=sx.set)
+        self.tree.grid(row=0,column=0,sticky="nsew")
+        sy.grid(row=0,column=1,sticky="ns")
+        sx.grid(row=1,column=0,sticky="ew")
+        self.table_frame.rowconfigure(0,weight=1)
+        self.table_frame.columnconfigure(0,weight=1)
+        self.table_frame.bind("<Configure>",self._on_table_configure,add="+")
         self.tree.bind("<Double-1>",self.double_click)
         self.tree.bind("<Control-a>",self.select_all_visible)
         self.tree.bind("<Control-A>",self.select_all_visible)
 
-        ah=ttk.Frame(activity_frame); ah.pack(fill="x",pady=(0,4))
+        ah=ttk.Frame(self.activity_frame); ah.pack(fill="x",pady=(0,4))
         ttk.Label(ah,text="Activity",font=("Segoe UI",10,"bold")).pack(side="left")
         ttk.Button(ah,text="Clear",command=lambda:self.activity_clear()).pack(side="right")
-        self.activity=tk.Text(activity_frame,width=45,wrap="word",font=("Consolas",9),state="disabled")
-        ay=ttk.Scrollbar(activity_frame,orient="vertical",command=self.activity.yview)
+        self.activity=tk.Text(self.activity_frame,width=38,wrap="word",font=("Consolas",9),state="disabled")
+        ay=ttk.Scrollbar(self.activity_frame,orient="vertical",command=self.activity.yview)
         self.activity.configure(yscrollcommand=ay.set)
         ay.pack(side="right",fill="y"); self.activity.pack(side="left",fill="both",expand=True)
 
         self.status=UIStatusVar(value=ui_tr("Ready"))
         ttk.Label(self,textvariable=self.status,relief="sunken",anchor="w",padding=5).pack(side="bottom",fill="x")
         self.log("Ready — live scraper activity will appear here.")
+
+    def _restore_main_pane(self):
+        if not hasattr(self,"main_pane"): return
+        self.update_idletasks()
+        total=self.main_pane.winfo_width()
+        if total<=1:return
+        try: activity_w=int(float(self.db.get_setting("main_activity_width","320") or 320))
+        except Exception: activity_w=320
+        activity_w=max(ACTIVITY_PANE_MIN_WIDTH,activity_w)
+        sash=max(TABLE_PANE_MIN_WIDTH,total-activity_w)
+        sash=min(sash,max(TABLE_PANE_MIN_WIDTH,total-ACTIVITY_PANE_MIN_WIDTH))
+        try:self.main_pane.sashpos(0,sash)
+        except Exception:pass
+
+    def _on_main_pane_configure(self,event=None):
+        if not hasattr(self,"main_pane"):return
+        try:
+            total=self.main_pane.winfo_width()
+            if total<=1:return
+            sash=self.main_pane.sashpos(0)
+            lo=min(TABLE_PANE_MIN_WIDTH,max(1,total-ACTIVITY_PANE_MIN_WIDTH))
+            hi=max(lo,total-ACTIVITY_PANE_MIN_WIDTH)
+            target=max(lo,min(sash,hi))
+            if target!=sash:self.main_pane.sashpos(0,target)
+        except Exception:
+            pass
+
+    def _on_table_configure(self,event=None):
+        if getattr(self,"_table_resize_job",None):
+            try:self.after_cancel(self._table_resize_job)
+            except Exception:pass
+        self._table_resize_job=self.after(90,self._finish_table_resize)
+
+    def _finish_table_resize(self):
+        self._table_resize_job=None
+        old=self.tree.column("title","width") if hasattr(self,"tree") else 0
+        self._resize_table_columns()
+        new=self.tree.column("title","width") if hasattr(self,"tree") else 0
+        # Re-wrap titles after a meaningful width change. This is cheap compared with
+        # leaving text clipped, and is debounced while the user drags/resizes.
+        if old and abs(new-old)>=8 and self.db.get_setting("show_covers","1")!="1":
+            self.refresh()
+
+    def _resize_table_columns(self):
+        if not hasattr(self,"tree") or not hasattr(self,"table_frame"):return
+        available=max(1,self.table_frame.winfo_width()-22)
+        displayed=set(self.tree.cget("displaycolumns"))
+        show_cover=self.db.get_setting("show_covers","1")=="1"
+
+        # Store columns stay readable; the Book column absorbs remaining width and
+        # wraps vertically. A horizontal scrollbar remains as a final fallback.
+        desired={
+            "booklive":100,"bookwalker":120,"dmm":95,"amazon":100,
+            "lowest":145,"stores":78
+        }
+        fixed=0
+        for col,w in desired.items():
+            if col in displayed:
+                self.tree.column(col,width=w,minwidth=70 if col!="stores" else 72,stretch=False)
+                fixed+=w
+        cover_w=self.tree.column("#0","width") if show_cover else 0
+        title_w=max(190,available-fixed-cover_w)
+        self.tree.column("title",width=title_w,minwidth=190,stretch=False)
 
     def rebuild_list_tabs(self):
         for tab in self.list_tabs.tabs(): self.list_tabs.forget(tab)
@@ -1240,6 +1369,8 @@ class App(tk.Tk):
                 visible.append(column_id)
         visible += ["lowest","stores"]
         self.tree.configure(displaycolumns=visible)
+        if hasattr(self,"table_frame"):
+            self.after_idle(self._resize_table_columns)
 
     def cover_view(self):
         show=self.db.get_setting("show_covers","1")=="1"
@@ -1278,6 +1409,8 @@ class App(tk.Tk):
 
     def refresh(self):
         self.apply_store_columns()
+        self.update_idletasks()
+        self._resize_table_columns()
         self._cover_photos={}
         show_covers,cover_size,(cover_w,cover_h,_cw,_rh)=self.cover_view()
         for x in self.tree.get_children(): self.tree.delete(x)
