@@ -23,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.8.4"
-APP_VERSION = "1.8.4"
+APP_NAME = "Book Sale Notification 1.8.5"
+APP_VERSION = "1.8.5"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -45,6 +45,8 @@ STORES = ("BookLive", "BOOK☆WALKER", "DMM", "Amazon")
 SEARCH_STORES = ("BookLive", "BOOK☆WALKER", "DMM")
 MANUAL_URL_STORES = STORES
 STORE_KEYS = {"BookLive":"booklive", "BOOK☆WALKER":"bookwalker", "DMM":"dmm", "Amazon":"amazon"}
+TITLE_SOURCE_PRIORITY = ("BookLive","DMM","BOOK☆WALKER","Amazon")
+COVER_SOURCE_PRIORITY = ("BookLive","Amazon","DMM","BOOK☆WALKER")
 
 UI_LANG="en"
 JA_UI={
@@ -605,9 +607,47 @@ class DB:
             try: self.cx.execute("ALTER TABLE books ADD COLUMN "+col)
             except sqlite3.OperationalError: pass
         self.cx.commit()
+        self._standardize_existing_titles_once()
 
     def offer_identity(self, offer):
         return (offer.store, offer.store_id or "", canonical_store_url(offer.store,offer.url))
+
+    def refresh_canonical_metadata(self, book_id, commit=False):
+        """Standardize the displayed book title from the best matched storefront.
+
+        Title priority is BookLive > DMM > BOOK☆WALKER > Amazon. Amazon therefore
+        supplies the canonical title only while it is the only matched source.
+        """
+        rows=self.cx.execute("SELECT store,title,author FROM offers WHERE book_id=?",(book_id,)).fetchall()
+        by_store={r["store"]:r for r in rows}
+        chosen=None
+        for store in TITLE_SOURCE_PRIORITY:
+            r=by_store.get(store)
+            if r and (r["title"] or "").strip():
+                chosen=r; break
+        if not chosen:return
+
+        title=(chosen["title"] or "").strip()
+        author=(chosen["author"] or "").strip()
+        if not author:
+            for store in TITLE_SOURCE_PRIORITY:
+                r=by_store.get(store)
+                if r and (r["author"] or "").strip():
+                    author=(r["author"] or "").strip(); break
+
+        self.cx.execute("UPDATE books SET title=?,norm_title=?,author=? WHERE id=?",
+                        (title,normalize_title(title),author,book_id))
+        if commit:self.cx.commit()
+
+    def _standardize_existing_titles_once(self):
+        marker="canonical_title_priority_v1"
+        if self.cx.execute("SELECT 1 FROM settings WHERE key=?",(marker,)).fetchone():
+            return
+        ids=[r["id"] for r in self.cx.execute("SELECT id FROM books").fetchall()]
+        for bid in ids:
+            self.refresh_canonical_metadata(bid,commit=False)
+        self.cx.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",(marker,"1"))
+        self.cx.commit()
 
     def import_offer(self, offer, list_id=1):
         """Wishlist import: same-store identity only. Never fuzzy-merge titles."""
@@ -620,12 +660,15 @@ class DB:
                 self.cx.execute("""UPDATE offers SET title=?,price=?,list_price=?,reward_pct=?,reward_value=?,tax_ex_price=?,author=?,flags=?,observed_at=CURRENT_TIMESTAMP WHERE id=?""",
                     (offer.title,offer.price,offer.list_price,offer.reward_pct,offer.reward_value,offer.tax_ex_price,offer.author,offer.flags,oid))
             self.cx.execute("INSERT OR IGNORE INTO list_books(list_id,book_id) VALUES(?,?)",(list_id,bid))
+            self.refresh_canonical_metadata(bid,commit=False)
             self.cx.commit(); return bid,False
         cur=self.cx.execute("INSERT INTO books(title,norm_title,author) VALUES(?,?,?)",(offer.title,normalize_title(offer.title),offer.author)); bid=cur.lastrowid
         cur=self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,price,list_price,reward_pct,reward_value,tax_ex_price,author,flags) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (bid,offer.store,offer.store_id,offer.title,url,offer.price,offer.list_price,offer.reward_pct,offer.reward_value,offer.tax_ex_price,offer.author,offer.flags)); oid=cur.lastrowid
         self.cx.execute("INSERT OR IGNORE INTO price_history(offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)",(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value))
-        self.cx.execute("INSERT OR IGNORE INTO list_books(list_id,book_id) VALUES(?,?)",(list_id,bid)); self.cx.commit(); return bid,True
+        self.cx.execute("INSERT OR IGNORE INTO list_books(list_id,book_id) VALUES(?,?)",(list_id,bid))
+        self.refresh_canonical_metadata(bid,commit=False)
+        self.cx.commit(); return bid,True
 
     def import_manual_bundle(self, primary, offers, list_id=1):
         """Atomically add one manually supplied product and exact cross-store matches.
@@ -687,8 +730,7 @@ class DB:
                 (offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)""",
                 (oid,o.price,o.list_price,o.reward_pct,o.reward_value))
 
-        self.cx.execute("UPDATE books SET title=?,norm_title=?,author=? WHERE id=?",
-                        (primary.title,normalize_title(primary.title),primary.author or "",bid))
+        self.refresh_canonical_metadata(bid,commit=False)
         self.cx.commit()
         return bid
 
@@ -710,7 +752,9 @@ class DB:
         if same:return bid
         cur=self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,price,list_price,reward_pct,reward_value,tax_ex_price,author,flags) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (bid,offer.store,offer.store_id,offer.title,canonical_store_url(offer.store,offer.url),offer.price,offer.list_price,offer.reward_pct,offer.reward_value,offer.tax_ex_price,offer.author,offer.flags)); oid=cur.lastrowid
-        self.cx.execute("INSERT OR IGNORE INTO price_history(offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)",(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value)); self.cx.commit(); return bid
+        self.cx.execute("INSERT OR IGNORE INTO price_history(offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)",(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value))
+        self.refresh_canonical_metadata(bid,commit=False)
+        self.cx.commit(); return bid
 
     def update_offer_for_book(self, book_id, store, offer):
         """Refresh one already-associated store offer without canonical rematching."""
@@ -738,6 +782,7 @@ class DB:
         self.cx.execute("""INSERT OR IGNORE INTO price_history(offer_id,price,list_price,reward_pct,reward_value)
                            VALUES(?,?,?,?,?)""",
                         (oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value))
+        self.refresh_canonical_metadata(book_id,commit=False)
         self.cx.commit()
         return book_id
 
@@ -867,7 +912,9 @@ class DB:
         self.snapshot_book(drop,'merge')
         self.cx.execute("UPDATE offers SET book_id=? WHERE book_id=?",(keep,drop))
         self.cx.execute("INSERT OR IGNORE INTO list_books(list_id,book_id) SELECT list_id,? FROM list_books WHERE book_id=?",(keep,drop))
-        self.cx.execute("DELETE FROM books WHERE id=?",(drop,)); self.cx.commit(); return True
+        self.cx.execute("DELETE FROM books WHERE id=?",(drop,))
+        self.refresh_canonical_metadata(keep,commit=False)
+        self.cx.commit(); return True
 
     def history_for_book(self,book_id):
         return self.cx.execute("""SELECT h.observed_at,o.store,h.price,h.list_price,h.reward_pct,h.reward_value,h.provenance
@@ -1353,7 +1400,7 @@ class App(tk.Tk):
         if not self.store_enabled(store): return
         if not url or Image is None: return
 
-        # Cover priority: BookLive > BOOK☆WALKER > DMM.  A store may replace its
+        # Cover priority: BookLive > Amazon > DMM > BOOK☆WALKER. A store may replace its
         # own cached cover when its image URL changes (important for DMM preorders,
         # which can initially expose a placeholder and add the real cover later).
         def source_for(u):
@@ -1363,7 +1410,7 @@ class App(tk.Tk):
             if "dmm" in u: return "DMM"
             if "amazon" in u or "media-amazon" in u: return "Amazon"
             return ""
-        priority={"Amazon":1,"DMM":2,"BOOK☆WALKER":3,"BookLive":4}
+        priority={"BOOK☆WALKER":1,"DMM":2,"Amazon":3,"BookLive":4}
 
         row=self.db.cx.execute("SELECT cover_url,cover_path FROM books WHERE id=?",(bid,)).fetchone()
         if row and row["cover_path"] and Path(row["cover_path"]).exists():
@@ -1589,7 +1636,7 @@ class App(tk.Tk):
             bid=self.db.import_manual_bundle(primary,list(found.values()),self.current_list_id)
 
             # Download the best available cover after the database transaction.
-            for store in ("BookLive","BOOK☆WALKER","DMM","Amazon"):
+            for store in COVER_SOURCE_PRIORITY:
                 o=found.get(store)
                 if o and o.cover_url:
                     self.cache_cover(bid,store,o.cover_url)
