@@ -24,8 +24,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.9.0-beta.4"
-APP_VERSION = "1.9.0-beta.4"
+APP_NAME = "Book Sale Notification 1.9.0-beta.5"
+APP_VERSION = "1.9.0-beta.5"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -306,6 +306,9 @@ JA_UI={
         "有効なウィッシュリスト内にCalibre識別子と完全一致する書籍がありません。",
     "Notification rule":"通知ルール","Any sale":"セールなら通知","Lowest recorded price":"記録上の最安値",
     "Good deal":"お得な価格","Good-deal threshold (> %):":"お得判定の割引率 (> %):",
+    "Test sale notification":"セール通知をテスト",
+    "Simulates a 50% sale using the selected rule. No book data or price history is changed.":
+        "選択中の通知ルールで50%オフのセールを模擬します。書籍データや価格履歴は変更されません。",
     "Show direct DMM points / BOOK☆WALKER coins / Amazon points in store price columns":
         "DMMポイント / BOOK☆WALKERコイン / Amazonポイントを価格欄に表示",
     "BOOK☆WALKER overseas tax mode (show stored tax-exclusive price when known)":
@@ -322,9 +325,27 @@ JA_UI={
     "Opening BOOK☆WALKER sign-in…":"BOOK☆WALKERのログイン画面を開いています…",
     "BOOK☆WALKER connected":"BOOK☆WALKERに接続しました",
     "BOOK☆WALKER sign-in was not completed.":"BOOK☆WALKERへのログインが完了しませんでした。",
+    "Check for new versions on startup (never installs automatically)":"起動時に新しいバージョンを確認する（自動インストールはしません）",
     "Use nightly / pre-release versions (test builds)":"ナイトリー / プレリリース版（テストビルド）を使用する",
     "Off = stable releases only. Test builds may contain unfinished fixes.":
         "オフの場合は安定版のみです。テストビルドには未完成の修正が含まれる場合があります。",
+    "Check now":"今すぐ確認",
+    "Signed in":"ログイン済み",
+    "Signed in (last known)":"ログイン済み（前回確認）",
+    "Session expired":"セッション期限切れ",
+    "Not signed in":"未ログイン",
+    "Not checked":"未確認",
+    "Checking…":"確認中…",
+    "Japanese access available":"日本のIPでアクセス可能",
+    "Japanese IP required":"日本のIPアドレスが必要",
+    "Could not check":"確認できませんでした",
+    "Close button (X):":"閉じるボタン (X):",
+    "Minimize to system tray":"システムトレイに最小化",
+    "Exit application":"アプリを終了",
+    "BOOK☆WALKER sign-in required":"BOOK☆WALKERへの再ログインが必要",
+    "System tray unavailable":"システムトレイを利用できません",
+    "The system tray icon could not be created, so the app was left open.":
+        "システムトレイのアイコンを作成できなかったため、アプリは開いたままです。",
     "Automatic update interval (hours):":"自動更新間隔（時間）:",
     "Minimum delay between store requests (seconds):":"ストアへの最低アクセス間隔（秒）:",
     "Appearance:":"外観:","Recently Deleted retention (days):":"最近削除した項目の保持日数:",
@@ -2435,23 +2456,23 @@ class App(tk.Tk):
     def _run_bookwalker_health_check(self,status_var=None,notify_expiry=False):
         previous=self.db.get_setting(
             "bookwalker_session_state","valid" if load_bookwalker_cookies() else "never")
-        if status_var is not None:status_var.set("Checking…")
+        if status_var is not None:status_var.set(ui_tr("Checking…"))
         def work():
             status,detail=check_bookwalker_session()
             def finish():
                 if status=="signed_in":
                     self.db.set_setting("bookwalker_session_state","valid")
-                    if status_var is not None:status_var.set("Signed in")
+                    if status_var is not None:status_var.set(ui_tr("Signed in"))
                     self.log("[BOOK☆WALKER] Login health check: signed in")
                 elif status=="signed_out":
                     self.db.set_setting("bookwalker_session_state","expired" if previous=="valid" else "never")
                     if status_var is not None:
-                        status_var.set("Session expired" if previous=="valid" else "Not signed in")
+                        status_var.set(ui_tr("Session expired" if previous=="valid" else "Not signed in"))
                     self.log("[BOOK☆WALKER] Login health check: signed out")
                     if notify_expiry and previous=="valid":
                         self._notify_bookwalker_expired()
                 else:
-                    if status_var is not None:status_var.set("Could not check")
+                    if status_var is not None:status_var.set(ui_tr("Could not check"))
                     self.log(f"[BOOK☆WALKER] Login health check unavailable: {detail}")
             self.after(0,finish)
         threading.Thread(target=work,daemon=True).start()
@@ -2469,7 +2490,7 @@ class App(tk.Tk):
         self.after(6*60*60*1000,self._scheduled_bookwalker_health_check)
 
     def _run_dmm_health_check(self,status_var=None):
-        if status_var is not None:status_var.set("Checking…")
+        if status_var is not None:status_var.set(ui_tr("Checking…"))
         def work():
             status,detail=check_dmm_access()
             def finish():
@@ -2482,7 +2503,7 @@ class App(tk.Tk):
                 else:
                     text="Could not check"
                     self.log(f"[DMM] Health check unavailable: {detail}")
-                if status_var is not None:status_var.set(text)
+                if status_var is not None:status_var.set(ui_tr(text))
             self.after(0,finish)
         threading.Thread(target=work,daemon=True).start()
 
@@ -2516,7 +2537,7 @@ class App(tk.Tk):
                     try: button.configure(state="normal")
                     except Exception: pass
                 if code==0 and cookies:
-                    if status_var is not None: status_var.set("Signed in")
+                    if status_var is not None: status_var.set(ui_tr("Signed in"))
                     self.db.set_setting("bookwalker_session_state","valid")
                     self._start_bookwalker_health_schedule()
                     try:
@@ -2614,7 +2635,7 @@ class App(tk.Tk):
         bw_initial=("Signed in (last known)" if bw_state=="valid" and load_bookwalker_cookies()
                     else "Session expired" if bw_state=="expired"
                     else "Not signed in — cash prices still work; coins are hidden.")
-        bw_status=tk.StringVar(value=bw_initial)
+        bw_status=tk.StringVar(value=ui_tr(bw_initial))
         bw_button=ttk.Button(bw_login,text="Sign in to BOOK☆WALKER")
         bw_button.pack(side="left")
         ttk.Button(bw_login,text="Check now",
@@ -2624,7 +2645,7 @@ class App(tk.Tk):
 
         ttk.Checkbutton(f,text="DMM",variable=store_dmm,command=apply_store_settings).pack(anchor="w")
         dmm_health=ttk.Frame(f); dmm_health.pack(fill="x",padx=(22,0),pady=(2,5))
-        dmm_status=tk.StringVar(value="Not checked")
+        dmm_status=tk.StringVar(value=ui_tr("Not checked"))
         ttk.Button(dmm_health,text="Check now",command=lambda:self._run_dmm_health_check(dmm_status)).pack(side="left")
         ttk.Label(dmm_health,textvariable=dmm_status,wraplength=330).pack(side="left",padx=(10,0))
         ttk.Checkbutton(f,text="Amazon (HTML import + direct price refresh only)",variable=store_amazon,command=apply_store_settings).pack(anchor="w")
