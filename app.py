@@ -32,8 +32,8 @@ try:
 except ImportError:
     Figure=FigureCanvasTkAgg=NavigationToolbar2Tk=mdates=MultipleLocator=FuncFormatter=None
 
-APP_NAME = "Book Sale Notification 1.9.1-beta.4"
-APP_VERSION = "1.9.1-beta.4"
+APP_NAME = "Book Sale Notification 1.9.1-beta.5"
+APP_VERSION = "1.9.1-beta.5"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -922,6 +922,59 @@ class DB:
         self.cx.commit()
         self._standardize_existing_titles_once()
         self._backfill_sale_state_once()
+        self._compact_price_history_once()
+
+    def _history_key(self,row):
+        return (row["price"],row["list_price"],row["reward_pct"],row["reward_value"])
+
+    def _record_history_if_changed(self,offer_id,price,list_price,reward_pct,reward_value,provenance="local"):
+        """Store only meaningful changes; offers.observed_at still records every successful check."""
+        last=self.cx.execute("""SELECT price,list_price,reward_pct,reward_value
+            FROM price_history WHERE offer_id=? ORDER BY observed_at DESC,id DESC LIMIT 1""",(offer_id,)).fetchone()
+        new_key=(price,list_price,reward_pct,reward_value)
+        if last is not None and self._history_key(last)==new_key:
+            return False
+        self.cx.execute("""INSERT INTO price_history
+            (offer_id,price,list_price,reward_pct,reward_value,provenance)
+            VALUES(?,?,?,?,?,?)""",(offer_id,price,list_price,reward_pct,reward_value,provenance))
+        return True
+
+    def _compact_price_history_once(self):
+        """Collapse old consecutive duplicate observations into change events only."""
+        marker="price_history_compacted_v1"
+        if self.cx.execute("SELECT 1 FROM settings WHERE key=?",(marker,)).fetchone():
+            return
+        delete_ids=[]
+        offer_ids=[r["offer_id"] for r in self.cx.execute(
+            "SELECT DISTINCT offer_id FROM price_history ORDER BY offer_id").fetchall()]
+        for oid in offer_ids:
+            rows=self.cx.execute("""SELECT id,price,list_price,reward_pct,reward_value
+                FROM price_history WHERE offer_id=? ORDER BY observed_at,id""",(oid,)).fetchall()
+            previous=None
+            for row in rows:
+                key=self._history_key(row)
+                if previous is not None and key==previous:
+                    delete_ids.append(row["id"])
+                else:
+                    previous=key
+        if delete_ids:
+            d=DATA_DIR/"backups"; d.mkdir(parents=True,exist_ok=True)
+            stamp=datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            backup=d/f"auto_{stamp}_history_compaction.db"
+            dst=sqlite3.connect(backup)
+            self.cx.backup(dst); dst.close()
+            self.cx.executemany("DELETE FROM price_history WHERE id=?",[(x,) for x in delete_ids])
+        self.cx.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                        (marker,str(len(delete_ids))))
+        self.cx.commit()
+
+    def delete_history_ids(self,ids):
+        ids=[int(x) for x in ids]
+        if not ids:return 0
+        q=",".join("?" for _ in ids)
+        cur=self.cx.execute(f"DELETE FROM price_history WHERE id IN ({q})",ids)
+        self.cx.commit()
+        return cur.rowcount
 
     def offer_identity(self, offer):
         return (offer.store, offer.store_id or "", canonical_store_url(offer.store,offer.url))
@@ -1009,7 +1062,7 @@ class DB:
         cur=self.cx.execute("INSERT INTO books(title,norm_title,author) VALUES(?,?,?)",(offer.title,normalize_title(offer.title),offer.author)); bid=cur.lastrowid
         cur=self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,price,list_price,reward_pct,reward_value,tax_ex_price,author,flags) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (bid,offer.store,offer.store_id,offer.title,url,offer.price,offer.list_price,offer.reward_pct,offer.reward_value,offer.tax_ex_price,offer.author,offer.flags)); oid=cur.lastrowid
-        self.cx.execute("INSERT OR IGNORE INTO price_history(offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)",(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value))
+        self._record_history_if_changed(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value)
         self.cx.execute("INSERT OR IGNORE INTO list_books(list_id,book_id) VALUES(?,?)",(list_id,bid))
         self.refresh_canonical_metadata(bid,commit=False)
         self.cx.commit(); return bid,True
@@ -1070,9 +1123,7 @@ class DB:
                     (bid,o.store,o.store_id,o.title,url,o.price,o.list_price,o.reward_pct,
                      o.reward_value,o.tax_ex_price,o.author,o.flags))
                 oid=cur.lastrowid
-            self.cx.execute("""INSERT OR IGNORE INTO price_history
-                (offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)""",
-                (oid,o.price,o.list_price,o.reward_pct,o.reward_value))
+            self._record_history_if_changed(oid,o.price,o.list_price,o.reward_pct,o.reward_value)
 
         self.refresh_canonical_metadata(bid,commit=False)
         self.cx.commit()
@@ -1096,7 +1147,7 @@ class DB:
         if same:return bid
         cur=self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,price,list_price,reward_pct,reward_value,tax_ex_price,author,flags) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (bid,offer.store,offer.store_id,offer.title,canonical_store_url(offer.store,offer.url),offer.price,offer.list_price,offer.reward_pct,offer.reward_value,offer.tax_ex_price,offer.author,offer.flags)); oid=cur.lastrowid
-        self.cx.execute("INSERT OR IGNORE INTO price_history(offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)",(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value))
+        self._record_history_if_changed(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value)
         self.refresh_canonical_metadata(bid,commit=False)
         self.cx.commit(); return bid
 
@@ -1123,9 +1174,7 @@ class DB:
                 WHERE id=?""",
                 (new_store_id,offer.title or row["title"],new_url,offer.price,offer.list_price,
                  offer.reward_pct,offer.reward_value,offer.tax_ex_price,offer.author,offer.flags,oid))
-        self.cx.execute("""INSERT OR IGNORE INTO price_history(offer_id,price,list_price,reward_pct,reward_value)
-                           VALUES(?,?,?,?,?)""",
-                        (oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value))
+        self._record_history_if_changed(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value)
         self.refresh_canonical_metadata(book_id,commit=False)
         self.cx.commit()
         return book_id
@@ -1354,7 +1403,7 @@ class DB:
         self.cx.commit(); return True
 
     def history_for_book(self,book_id):
-        return self.cx.execute("""SELECT h.observed_at,o.store,h.price,h.list_price,h.reward_pct,h.reward_value,h.provenance
+        return self.cx.execute("""SELECT h.id,h.offer_id,h.observed_at,o.store,h.price,h.list_price,h.reward_pct,h.reward_value,h.provenance
             FROM price_history h JOIN offers o ON o.id=h.offer_id WHERE o.book_id=?
             ORDER BY h.observed_at DESC""",(book_id,)).fetchall()
 
