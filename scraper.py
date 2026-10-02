@@ -87,6 +87,18 @@ class Client:
     def __init__(self,delay=1.25,timeout=20,logger=None):
         self.s=requests.Session(); self.s.headers.update({"User-Agent":UA,"Accept-Language":"ja-JP,ja;q=0.9,en;q=0.6"})
         self.delay=delay; self.timeout=timeout; self.last=0; self.last_url=""; self.logger=logger or (lambda m:None)
+    def load_cookies(self, records):
+        for item in records or []:
+            try:
+                name=str(item.get("name") or "")
+                value=str(item.get("value") or "")
+                domain=str(item.get("domain") or ".bookwalker.jp")
+                path=str(item.get("path") or "/")
+                if name and value and "bookwalker.jp" in domain.lower():
+                    self.s.cookies.set(name,value,domain=domain,path=path)
+            except Exception:
+                continue
+
     def get(self,url):
         wait=self.delay-(time.monotonic()-self.last)
         if wait>0:time.sleep(wait)
@@ -374,7 +386,7 @@ class BookWalker(Provider):
         if ignored_signup_coin is not None:
             self.c.logger(f"[BOOK☆WALKER] Ignored signed-out 新規限定 signup bonus: {ignored_signup_coin} coin")
         self.c.logger(f"[BOOK☆WALKER] Product values: cash={price}, tax_ex={taxex}, coins={reward}" +
-                      (" (signed in)" if login_true else " (signed out; normal coins unavailable)" if login_false else ""))
+                      (" (signed in)" if login_true else " (not signed in; coins hidden)" if login_false else ""))
         return Result(self.store,title,url.split("?")[0],sid,price=price,list_price=listp,
                       reward_value=reward,tax_ex_price=taxex,cover_url=cover)
 
@@ -817,6 +829,7 @@ class Amazon(Provider):
         return Result(self.store,title,canonical,asin,price=price,list_price=listp,
                       reward_value=reward,cover_url=cover)
 
-def providers(delay=1.25,logger=None):
+def providers(delay=1.25,logger=None,bookwalker_cookies=None):
     c=Client(delay=delay,logger=logger)
+    c.load_cookies(bookwalker_cookies)
     return {"BookLive":BookLive(c),"BOOK☆WALKER":BookWalker(c),"DMM":DMM(c),"Amazon":Amazon(c)}
