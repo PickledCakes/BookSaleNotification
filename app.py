@@ -132,6 +132,10 @@ JA_UI={
     "GitHub updates are not configured in this build yet.":"このビルドではGitHubアップデートが設定されていません。",
     "Release asset has no download URL.":"リリースファイルのダウンロードURLがありません。",
     "Ready":"準備完了","Same":"同額","price unavailable":"価格未取得",
+    "HTML files":"HTMLファイル","All files":"すべてのファイル","CSV files":"CSVファイル","JSON":"JSON",
+    "Book Sale shared list":"Book Sale共有リスト","Book Sale history":"Book Sale価格履歴",
+    "No book is selected. Match/reconcile ALL active books in this list?":
+        "書籍が選択されていません。このリスト内の有効な書籍をすべて照合しますか？",
     "delete":"削除","merge":"統合"
 }
 
@@ -1131,8 +1135,8 @@ class App(tk.Tk):
         # rows to a single 24px line; use the calculated wrapped-content height.
         ttk.Style(self).configure("Treeview",rowheight=rh if show else (no_cover_rowheight or 46))
 
-    def _wrap_tree_text(self,text,pixel_width,max_lines=5):
-        """Pixel-aware wrapping for Japanese/English text displayed in Treeview cells."""
+    def _wrap_tree_text(self,text,pixel_width):
+        """Pixel-aware full wrapping for Japanese/English text displayed in Treeview cells."""
         text=str(text or "")
         if not text:return text,1
         try: font=tkfont.nametofont("TkDefaultFont")
@@ -1140,21 +1144,18 @@ class App(tk.Tk):
         width=max(80,int(pixel_width)-14)
         lines=[]; current=""
         for ch in text:
+            if ch=="\n":
+                lines.append(current); current=""; continue
             trial=current+ch
             if current and font.measure(trial)>width:
                 lines.append(current)
                 current=ch
-                if len(lines)>=max_lines-1:
-                    current+=text[text.index(ch)+1:]
-                    break
             else:
                 current=trial
-        if current:lines.append(current)
-        lines=lines[:max_lines]
+        if current or not lines:lines.append(current)
         return "\n".join(lines),max(1,len(lines))
 
     def refresh(self):
-        self.apply_store_columns()
         self.apply_store_columns()
         self._cover_photos={}
         show_covers,cover_size,(cover_w,cover_h,_cw,_rh)=self.cover_view()
@@ -1170,7 +1171,7 @@ class App(tk.Tk):
                 max_lines=max(max_lines,nlines)
             # ttk.Treeview only supports one rowheight per widget, so size the current
             # view to the tallest wrapped visible row rather than clipping individual rows.
-            self.apply_cover_view(min(104, 8+19*max_lines))
+            self.apply_cover_view(8+19*max_lines)
         else:
             self.apply_cover_view()
         for b,offers in rows:
@@ -1189,7 +1190,7 @@ class App(tk.Tk):
             if recorded is not None and low is not None:
                 lowtxt += "  ★" if low <= recorded else f"  (low ¥{recorded:,})"
             if low is not None:
-                lowtxt += "\n" + ("Same" if len(enabled_matched)>=2 and len(cheapest)==len(enabled_matched)
+                lowtxt += "\n" + (ui_tr("Same") if len(enabled_matched)>=2 and len(cheapest)==len(enabled_matched)
                                    else " · ".join(cheapest))
             vals=(wrapped_titles.get(b["id"],b["title"]),self.price_text(offers.get("BookLive")),
                   self.price_text(offers.get("BOOK☆WALKER")),self.price_text(offers.get("DMM")),
