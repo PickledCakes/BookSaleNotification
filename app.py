@@ -1813,8 +1813,8 @@ class App(tk.Tk):
         self.current_list_id,self.archived_view=target; self.refresh()
 
     def show_match_report(self,content):
-        w=tk.Toplevel(self); w.title('Match Results'); w.geometry('900x650')
-        w.resizable(False,False)
+        w=self._single_window("match_results",'Match Results','900x650',resizable=(False,False))
+        if w is None:return
         t=tk.Text(w,wrap='word',font=('Consolas',9)); t.insert('1.0',content); t.configure(state='disabled'); t.pack(fill='both',expand=True,padx=10,pady=10)
         def copy(): self.clipboard_clear(); self.clipboard_append(content)
         ttk.Button(w,text='Close',command=w.destroy).pack(side='right',padx=10,pady=(0,10)); ttk.Button(w,text='Copy Log',command=copy).pack(side='right',pady=(0,10))
@@ -3732,8 +3732,8 @@ Start-Process -FilePath (Join-Path $install $exe) -WorkingDirectory $install
         def key(iid):
             value=str(self.tree.set(iid,col) or "")
             if col=="latest_sale":
-                try:return (0,datetime.fromisoformat(value).timestamp())
-                except Exception:return (1,0)
+                try:return datetime.fromisoformat(value).timestamp()
+                except Exception:return float("-inf")
             m=re.search(r'¥([0-9,]+)',value)
             if m:return (0,int(m.group(1).replace(",","")))
             return (1,value.casefold())
