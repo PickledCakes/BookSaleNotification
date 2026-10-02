@@ -620,49 +620,69 @@ class Amazon(Provider):
         return None,""
 
     def _kindle_swatch_price(self,soup,html):
-        """Read the Kindle purchase price from the row explicitly labelled Kindle版."""
-        # Current Amazon.co.jp markup literally labels the format row:
-        #   <span aria-label="Kindle版 (電子書籍) 形式:">...</span>
-        # and places the cash value beside it in:
-        #   <span class="... ebook-price-value" aria-label="￥396">￥396</span>
-        # Follow that semantic label first instead of depending on a particular row id.
-        label=soup.find("span",attrs={"aria-label":re.compile(r"Kindle版.*形式",re.I)})
-        if label:
+        """Read the Amazon.co.jp Kindle price independent of page language.
+
+        Amazon.co.jp currently offers Japanese, English and Chinese UI. All three
+        keep "Kindle" in the format label and use the same slot-price /
+        ebook-price-value classes; only the surrounding label and currency prefix
+        vary (￥396, ¥396, JP¥396).
+        """
+        def price_from(container,source):
+            if not container:return None
+            node=container.select_one(
+                ".slot-price .ebook-price-value[aria-label], "
+                ".slot-price .ebook-price-value, "
+                ".slot-price [aria-label]"
+            )
+            if node:
+                raw=(node.get("aria-label") or node.get_text(" ",strip=True) or "").strip()
+                value=yen_money(raw)
+                if value is not None:
+                    return value,source,raw
+            return None
+
+        # Best path: Amazon's language-independent Kindle swatch id.
+        kindle=soup.select_one("#tmm-grid-swatch-KINDLE")
+        hit=price_from(kindle,"#tmm-grid-swatch-KINDLE")
+        if hit:return hit
+
+        # Semantic fallback. Japanese, English and Chinese labels are currently:
+        #   Kindle版 (電子書籍) 形式:
+        #   Kindle (Digital) Format:
+        #   Kindle电子书 格式：
+        # Matching just "Kindle" keeps this independent of translated Format text.
+        for label in soup.find_all("span",attrs={"aria-label":re.compile(r"Kindle",re.I)}):
             node=label
             for _ in range(7):
-                node=node.parent
+                node=getattr(node,"parent",None)
                 if not node:break
-                price_node=node.select_one(".slot-price .ebook-price-value[aria-label], .slot-price [aria-label^='￥'], .slot-price [aria-label^='¥']")
-                if price_node:
-                    raw=(price_node.get("aria-label") or price_node.get_text(" ",strip=True) or "").strip()
-                    value=yen_money(raw)
-                    if value is not None:
-                        return value,"Kindle版 labelled row",raw
-                # Don't climb all the way into a page-wide container.
+                hit=price_from(node,"Kindle-labelled format row")
+                if hit:return hit
                 classes=set(node.get("class") or []) if hasattr(node,"get") else set()
                 if "a-container" in classes:break
 
-        # Known Amazon Kindle swatch id, retained as a secondary path.
-        kindle=soup.select_one("#tmm-grid-swatch-KINDLE")
-        if kindle:
-            price_node=kindle.select_one(".slot-price .ebook-price-value[aria-label], .slot-price [aria-label^='￥'], .slot-price [aria-label^='¥']")
-            if price_node:
-                raw=(price_node.get("aria-label") or price_node.get_text(" ",strip=True) or "").strip()
+        # Raw HTML fallback for malformed/partially parsed Amazon markup. Locate any
+        # Kindle aria-label, then require an ebook-price-value nearby. yen_money()
+        # accepts ￥396, ¥396 and JP¥396.
+        decoded=html_lib.unescape(html)
+        for m in re.finditer(r'aria-label=["\'][^"\']*Kindle[^"\']*["\']',decoded,re.I):
+            chunk=decoded[m.start():m.start()+6000]
+            pm=re.search(
+                r'<span[^>]*class=["\'][^"\']*ebook-price-value[^"\']*["\'][^>]*'
+                r'aria-label=["\']([^"\']+)["\']',
+                chunk,re.I
+            )
+            if not pm:
+                pm=re.search(
+                    r'<span[^>]*aria-label=["\']([^"\']+)["\'][^>]*'
+                    r'class=["\'][^"\']*ebook-price-value[^"\']*["\']',
+                    chunk,re.I
+                )
+            if pm:
+                raw=html_lib.unescape(pm.group(1)).strip()
                 value=yen_money(raw)
                 if value is not None:
-                    return value,"#tmm-grid-swatch-KINDLE labelled price",raw
-            raw=nfkc(kindle.get_text(" ",strip=True))
-            m=re.search(r"[¥￥]\s*([0-9][0-9,]*)",raw)
-            if m:return int(m.group(1).replace(",","")),"#tmm-grid-swatch-KINDLE text",m.group(0)
-
-        # Raw-HTML fallback: locate the Kindle-format label and only inspect the
-        # short block immediately following it for a yen-labelled price.
-        decoded=html_lib.unescape(html)
-        m=re.search(r'aria-label=["\'][^"\']*Kindle版[^"\']*形式[^"\']*["\']',decoded,re.I)
-        if m:
-            chunk=nfkc(decoded[m.start():m.start()+5000])
-            pm=re.search(r'aria-label=["\'][¥￥]\s*([0-9][0-9,]*)["\']',chunk,re.I)
-            if pm:return int(pm.group(1).replace(",","")),"raw Kindle版 labelled row",pm.group(0)
+                    return value,"raw Kindle-labelled format row",raw
 
         return None,"",""
 
