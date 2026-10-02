@@ -23,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.8.0"
-APP_VERSION = "1.8.0"
+APP_NAME = "Book Sale Notification 1.8.1"
+APP_VERSION = "1.8.1"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -38,7 +38,7 @@ DATA_DIR=app_data_dir()
 DB_PATH=DATA_DIR/"books.db"
 STORES = ("BookLive", "BOOK☆WALKER", "DMM", "Amazon")
 SEARCH_STORES = ("BookLive", "BOOK☆WALKER", "DMM")
-MANUAL_URL_STORES = SEARCH_STORES
+MANUAL_URL_STORES = STORES
 STORE_KEYS = {"BookLive":"booklive", "BOOK☆WALKER":"bookwalker", "DMM":"dmm", "Amazon":"amazon"}
 
 UI_LANG="en"
@@ -74,15 +74,15 @@ JA_UI={
         "更新内容を選択してください。既存の商品URLがある有効なストアだけにアクセスします。",
     "No matched product pages meet the selected update mode.":"選択した更新条件に該当する商品ページがありません。",
     "Edit store URLs":"ストアURLを編集",
-    "Manual URL editing is available for BookLive, BOOK☆WALKER and DMM. Amazon remains HTML-import only in this phase.":
-        "URLの手動編集はBookLive・BOOK☆WALKER・DMMのみ対応しています。Amazonは現在HTML読込のみです。",
+    "Manual URL editing is available for BookLive, BOOK☆WALKER and DMM. Amazon links can be added through Add from URL.":
+        "URLの手動編集はBookLive・BOOK☆WALKER・DMMに対応しています。Amazonは「URLから追加」から登録できます。",
     "Open":"開く","Save changes":"変更を保存","Invalid store URL":"無効なストアURL",
     "Add book from store URL":"ストアURLから書籍を追加",
-    "Add from BookLive / BOOK☆WALKER / DMM URL":"BookLive / BOOK☆WALKER / DMM のURLから追加",
+    "Add from BookLive / BOOK☆WALKER / DMM / Amazon URL":"BookLive / BOOK☆WALKER / DMM / Amazon のURLから追加",
     "Paste one product URL. The app will fetch that exact product, then search the other two stores and fetch their product pages before adding anything to the list.":
         "商品URLを1つ貼り付けてください。その商品を取得後、残り2ストアも検索し、商品ページを取得してからリストに追加します。",
     "Fetch all stores and add":"3ストアを確認して追加","Cancel":"キャンセル",
-    "Paste a valid BookLive, BOOK☆WALKER or DMM Books product URL.":
+    "Paste a valid BookLive, BOOK☆WALKER, DMM Books or Amazon.co.jp product URL.":
         "有効なBookLive、BOOK☆WALKER、またはDMM Booksの商品URLを貼り付けてください。",
     "Import wishlist HTML":"ウィッシュリストHTMLを読み込む",
     "Choose folder containing saved wishlist/list HTML files":
@@ -314,6 +314,26 @@ def cross_store_title_similarity(title_a,stores_a,title_b,stores_b):
 def canonical_url(url):
     if not url: return ""
     return url.split("?")[0].split("#")[0]
+
+def canonical_store_url(store, url):
+    """Return the stable product URL used by the database.
+
+    Amazon product links are aggressively reduced to /dp/<ASIN> so locale slugs,
+    search refs, query parameters and other tracking data are never stored.
+    """
+    raw=(url or "").strip()
+    if store=="Amazon":
+        try:
+            u=urlparse(raw)
+            host=(u.hostname or "").lower().rstrip(".")
+            if not (host=="amazon.co.jp" or host.endswith(".amazon.co.jp")):
+                return raw
+            m=re.search(r"/dp/([A-Z0-9]{10})(?:/|$)",u.path,re.I)
+            if m:
+                return f"https://www.amazon.co.jp/dp/{m.group(1).upper()}"
+        except Exception:
+            return raw
+    return canonical_url(raw)
 
 def valid_store_url(store, url):
     """Validate that a manually entered URL belongs to the selected storefront."""
@@ -555,7 +575,7 @@ class DB:
 
     def import_offer(self, offer, list_id=1):
         """Wishlist import: same-store identity only. Never fuzzy-merge titles."""
-        url=canonical_url(offer.url); offer.url=url
+        url=canonical_store_url(offer.store,offer.url); offer.url=url
         r=self.cx.execute("SELECT id,book_id,locked FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",
                           (offer.store,offer.store_id,url)).fetchone()
         if r:
@@ -585,7 +605,7 @@ class DB:
         # If any exact product identity is already known, reuse that canonical book.
         existing_ids=set()
         for o in offers:
-            url=canonical_url(o.url)
+            url=canonical_store_url(o.store,o.url)
             row=self.cx.execute(
                 "SELECT book_id FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",
                 (o.store,o.store_id or "",url)
@@ -637,7 +657,7 @@ class DB:
         return bid
 
     def find_book(self, offer):
-        r=self.cx.execute("SELECT book_id FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",(offer.store,offer.store_id,canonical_url(offer.url))).fetchone()
+        r=self.cx.execute("SELECT book_id FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",(offer.store,offer.store_id,canonical_store_url(offer.store,offer.url))).fetchone()
         if r:return r['book_id'],1.0
         rows=self.cx.execute("SELECT id,title FROM books WHERE status='active'").fetchall(); best=None;score=0
         for row in rows:
@@ -653,7 +673,7 @@ class DB:
         same=self.cx.execute("SELECT id FROM offers WHERE book_id=? AND store=?",(bid,offer.store)).fetchone()
         if same:return bid
         cur=self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,price,list_price,reward_pct,reward_value,tax_ex_price,author,flags) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (bid,offer.store,offer.store_id,offer.title,canonical_url(offer.url),offer.price,offer.list_price,offer.reward_pct,offer.reward_value,offer.tax_ex_price,offer.author,offer.flags)); oid=cur.lastrowid
+            (bid,offer.store,offer.store_id,offer.title,canonical_store_url(offer.store,offer.url),offer.price,offer.list_price,offer.reward_pct,offer.reward_value,offer.tax_ex_price,offer.author,offer.flags)); oid=cur.lastrowid
         self.cx.execute("INSERT OR IGNORE INTO price_history(offer_id,price,list_price,reward_pct,reward_value) VALUES(?,?,?,?,?)",(oid,offer.price,offer.list_price,offer.reward_pct,offer.reward_value)); self.cx.commit(); return bid
 
     def update_offer_for_book(self, book_id, store, offer):
@@ -1324,10 +1344,10 @@ class App(tk.Tk):
         win.grab_set()
 
         f=ttk.Frame(win,padding=16); f.pack(fill="both",expand=True)
-        ttk.Label(f,text="Add from BookLive / BOOK☆WALKER / DMM URL",
+        ttk.Label(f,text="Add from BookLive / BOOK☆WALKER / DMM / Amazon URL",
                   font=("Segoe UI",11,"bold")).pack(anchor="w")
-        ttk.Label(f,text=("Paste one product URL. The app will fetch that exact product, then search the other "
-                          "two stores and fetch their product pages before adding anything to the list."),
+        ttk.Label(f,text=("Paste one product URL. Amazon links are reduced to the clean /dp/ASIN form automatically. "
+                          "Amazon itself is not searched, but an Amazon URL can be used as the source to search the other three stores."),
                   wraplength=675).pack(anchor="w",pady=(5,10))
         urlvar=tk.StringVar()
         ent=ttk.Entry(f,textvariable=urlvar,width=92); ent.pack(fill="x",pady=(0,12)); ent.focus_set()
@@ -1346,6 +1366,7 @@ class App(tk.Tk):
                 "Paste a valid BookLive, BOOK☆WALKER or DMM Books product URL.")
             return
 
+        url=canonical_store_url(source_store,url)
         dialog.destroy()
         self.status.set(f"Reading {source_store} product…")
         self.log(f"[Manual add] Source: {source_store} • {url}")
@@ -1390,7 +1411,7 @@ class App(tk.Tk):
             bid=self.db.import_manual_bundle(primary,list(found.values()),self.current_list_id)
 
             # Download the best available cover after the database transaction.
-            for store in ("BookLive","BOOK☆WALKER","DMM"):
+            for store in ("BookLive","BOOK☆WALKER","DMM","Amazon"):
                 o=found.get(store)
                 if o and o.cover_url:
                     self.cache_cover(bid,store,o.cover_url)
@@ -1398,7 +1419,7 @@ class App(tk.Tk):
 
             self.refresh()
             lines=[]
-            for store in SEARCH_STORES:
+            for store in STORES:
                 o=found.get(store)
                 if not o:
                     lines.append(f"{store}: no confident match")
@@ -1406,7 +1427,7 @@ class App(tk.Tk):
                 price=f"¥{o.price:,}" if o.price is not None else "price unavailable"
                 lines.append(f"{store}: {price}\n{o.url}")
             messagebox.showinfo("Book added",
-                f"{primary.title}\n\nChecked all three stores before adding.\n\n" + "\n\n".join(lines))
+                f"{primary.title}\n\nChecked all available store matches before adding.\n\n" + "\n\n".join(lines))
         except Exception as e:
             messagebox.showerror("Manual add failed",f"{type(e).__name__}: {e}")
         finally:
@@ -1482,12 +1503,12 @@ class App(tk.Tk):
 
         outer=ttk.Frame(win,padding=14); outer.pack(fill="both",expand=True)
         ttk.Label(outer,text=book["title"],font=("Segoe UI",11,"bold"),wraplength=850).pack(anchor="w",pady=(0,12))
-        ttk.Label(outer,text="Manual URL editing is available for BookLive, BOOK☆WALKER and DMM. Amazon remains HTML-import only in this phase.",
+        ttk.Label(outer,text="Manual URL editing is available for BookLive, BOOK☆WALKER and DMM. Amazon links can be added through Add from URL.",
                   foreground="#555").pack(anchor="w",pady=(0,10))
 
         vars={}
         grid=ttk.Frame(outer); grid.pack(fill="x",expand=True)
-        for i,store in enumerate(MANUAL_URL_STORES):
+        for i,store in enumerate(SEARCH_STORES):
             ttk.Label(grid,text=store,width=14).grid(row=i,column=0,sticky="w",pady=5)
             v=tk.StringVar(value=current.get(store,""))
             vars[store]=v
@@ -2052,7 +2073,7 @@ class App(tk.Tk):
                             r=p.best(qtitle,qauthor); checked+=1
                             if r:
                                 # If this exact store product was imported as its own canonical entry, merge that entry instead of duplicating offer.
-                                er=worker_db.cx.execute("SELECT book_id FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",(store,r.store_id,canonical_url(r.url))).fetchone()
+                                er=worker_db.cx.execute("SELECT book_id FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",(store,r.store_id,canonical_store_url(store,r.url))).fetchone()
                                 if er and er['book_id']!=book_id:
                                     other=er['book_id']; ob=worker_db.cx.execute("SELECT title FROM books WHERE id=?",(other,)).fetchone()
                                     if worker_db.merge_books(book_id,other):
