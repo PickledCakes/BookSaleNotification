@@ -5,16 +5,16 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **BookLive**
 - **BOOK☆WALKER**
 - **DMM Books**
-- **Amazon Kindle** — phase 1 only: HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
+- **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.8.0**
+> Current version: **1.8.1**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
 ## Main features
 
 - Import wishlists from saved HTML.
-- Add individual BookLive / BOOK☆WALKER / DMM books by product URL.
+- Add individual BookLive / BOOK☆WALKER / DMM / Amazon books by product URL.
 - Match the same book across supported stores.
 - Compare current cash prices in one table.
 - Show DMM points, BOOK☆WALKER coins, and Amazon points separately.
@@ -80,10 +80,22 @@ Amazon is being added gradually.
 
 For now:
 
-- Amazon books must enter through HTML import.
 - Amazon search/discovery is disabled.
-- Manual Amazon URL entry is disabled.
-- Once an Amazon ASIN is imported, the app can attempt to refresh that known product page directly.
+- Amazon books can be imported from supported HTML **or added directly from an Amazon.co.jp product URL**.
+- Once an ASIN is known, the app can refresh that exact product page directly.
+- Long Amazon URLs are normalized before storing. Locale/title slugs, `/ref=...`, query parameters, and tracking data are removed.
+
+For example, URLs such as:
+
+`https://www.amazon.co.jp/-/en/some-title/dp/B07FWTQN6R/ref=sr_1_1?...tracking...`
+
+and:
+
+`https://www.amazon.co.jp/some-japanese-title/dp/B07FWTQN6R`
+
+are both stored as:
+
+`https://www.amazon.co.jp/dp/B07FWTQN6R`
 
 Supported Amazon HTML sources:
 
@@ -163,7 +175,7 @@ Calibre sync does not use fuzzy title matching.
 
 ## Current limitations
 
-- Amazon search/discovery is still disabled.
+- Amazon search/discovery is still disabled; direct Amazon product URLs are supported.
 - Storefront HTML and page layouts can change and may temporarily break parsing.
 - Some pages may return 403 or other request errors even when they open normally in a browser.
 - Matching is heuristic and intentionally conservative.
