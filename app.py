@@ -1144,6 +1144,9 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.db=DB()
+        self._tray_icon=None
+        self._tray_thread=None
+        self._tray_ready=None
         self.minsize(MAIN_MIN_WIDTH,MAIN_MIN_HEIGHT)
         self._restore_window_geometry()
         self.protocol("WM_DELETE_WINDOW",self._on_close)
@@ -1165,6 +1168,10 @@ class App(tk.Tk):
             self.after_idle(lambda:self.state("zoomed"))
         if self.db.get_setting("check_updates_on_startup","1")=="1":
             self.after(1800,lambda:self.check_for_updates(silent=True,automatic=True))
+        # If this user previously had a BOOK☆WALKER session, verify it shortly
+        # after startup and then every six hours while the app remains running.
+        if load_bookwalker_cookies():
+            self.after(8000,self._scheduled_bookwalker_health_check)
 
     def _restore_window_geometry(self):
         saved=self.db.get_setting("main_window_geometry",MAIN_DEFAULT_GEOMETRY)
@@ -1198,9 +1205,92 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    def _on_close(self):
+    def _tray_image(self):
+        if Image is None:return None
+        img=Image.new("RGBA",(64,64),(38,91,150,255))
+        if ImageDraw is not None:
+            d=ImageDraw.Draw(img)
+            d.rounded_rectangle((12,10,52,54),radius=5,fill=(255,255,255,255))
+            d.line((32,12,32,52),fill=(38,91,150,255),width=3)
+            d.line((18,21,28,21),fill=(38,91,150,255),width=3)
+            d.line((36,21,46,21),fill=(38,91,150,255),width=3)
+            d.line((18,31,28,31),fill=(38,91,150,255),width=3)
+            d.line((36,31,46,31),fill=(38,91,150,255),width=3)
+        return img
+
+    def _ensure_tray_icon(self):
+        if self._tray_icon is not None:return True
+        try:
+            import pystray
+            image=self._tray_image()
+            if image is None:return False
+            open_text="開く" if UI_LANG=="ja" else "Open Book Sale Notification"
+            exit_text="終了" if UI_LANG=="ja" else "Exit"
+            menu=pystray.Menu(
+                pystray.MenuItem(open_text,lambda icon,item:self.after(0,self._restore_from_tray),default=True),
+                pystray.MenuItem(exit_text,lambda icon,item:self.after(0,self._exit_application))
+            )
+            icon=pystray.Icon("BookSaleNotification",image,APP_NAME,menu)
+            ready=threading.Event()
+            def setup(i):
+                i.visible=True
+                ready.set()
+            def runner():
+                try: icon.run(setup=setup)
+                except Exception: ready.set()
+            thread=threading.Thread(target=runner,daemon=True)
+            thread.start()
+            if not ready.wait(2.0):
+                try: icon.stop()
+                except Exception: pass
+                return False
+            self._tray_icon=icon
+            self._tray_thread=thread
+            return True
+        except Exception as e:
+            self.log(f"[Tray] Could not create system tray icon: {type(e).__name__}: {e}")
+            return False
+
+    def _hide_to_tray(self):
         self._save_window_state()
+        if not self._ensure_tray_icon():
+            messagebox.showwarning("System tray unavailable",
+                                   "The system tray icon could not be created, so the app was left open.")
+            return
+        self.withdraw()
+
+    def _restore_from_tray(self):
+        try:
+            if self._tray_icon is not None:
+                self._tray_icon.stop()
+        except Exception:
+            pass
+        self._tray_icon=None
+        self.deiconify()
+        if self.db.get_setting("main_window_state","normal")=="zoomed":
+            try:self.state("zoomed")
+            except Exception:pass
+        self.lift()
+        try:self.focus_force()
+        except Exception:pass
+
+    def _exit_application(self):
+        try:
+            if self.state()!="withdrawn":self._save_window_state()
+        except Exception:
+            pass
+        try:
+            if self._tray_icon is not None:self._tray_icon.stop()
+        except Exception:
+            pass
+        self._tray_icon=None
         self.destroy()
+
+    def _on_close(self):
+        if self.db.get_setting("close_button_behavior","tray")=="tray":
+            self._hide_to_tray()
+        else:
+            self._exit_application()
 
     def toggle_language(self):
         global UI_LANG
@@ -2833,7 +2923,7 @@ Start-Process -FilePath (Join-Path $install $exe) -WorkingDirectory $install
                 ps.write_text(script,encoding="utf-8")
                 subprocess.Popen(["powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-File",str(ps)],
                                  creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
-                self.after(0,self.destroy)
+                self.after(0,self._exit_application)
             except Exception as e:
                 self.after(0,lambda e=e:messagebox.showerror("Update failed",f"{type(e).__name__}: {e}"))
                 self.after(0,lambda:self.status.set("Ready"))
