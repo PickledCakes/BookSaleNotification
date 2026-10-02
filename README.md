@@ -5,12 +5,13 @@ A Windows desktop app for keeping a personal Japanese ebook watchlist across:
 - **BookLive**
 - **BOOK☆WALKER**
 - **DMM Books**
+- **Amazon Kindle (phase 1: HTML import + direct known-URL price refresh; search disabled)**
 
 The app imports books from saved wishlist HTML or from a single product URL, tries to match the same volume across the other supported stores, records prices over time, and gives you one place to compare the current cash price.
 
-> **Current version: 1.7.2**
+> **Current version: 1.8.0**
 >
-> Amazon is intentionally disabled for now.
+> Amazon is being introduced conservatively. Search/discovery is still disabled; Amazon entries must come from saved HTML.
 
 ---
 
@@ -18,7 +19,9 @@ The app imports books from saved wishlist HTML or from a single product URL, tri
 
 ### Import a wishlist from any supported store
 
-You can save your wishlist / saved-books page from BookLive, BOOK☆WALKER, or DMM Books as an HTML file and import it into the app.
+You can save a wishlist / saved-books page from BookLive, BOOK☆WALKER, DMM Books, or Amazon Kindle as HTML and import it into the app.
+
+Amazon phase 1 also supports HTML saved from **電子書籍の司書さん** (`k.xpg.jp/my/list.fcgi`). Amazon entries are identified by ASIN and stored with a permanent `amazon.co.jp/dp/<ASIN>` URL.
 
 Wishlist import is deliberately conservative:
 
@@ -31,7 +34,9 @@ This avoids accidentally combining things such as a normal volume, a split/seria
 
 ### Add a book manually from a product URL
 
-Click **Add from URL…** and paste a product URL from any one of the three stores.
+Click **Add from URL…** and paste a product URL from BookLive, BOOK☆WALKER, or DMM.
+
+Amazon is intentionally excluded from manual URL addition in phase 1; Amazon books must be imported from supported HTML.
 
 The app will:
 
@@ -78,13 +83,14 @@ The table shows:
 - BookLive price;
 - BOOK☆WALKER price;
 - DMM price;
+- Amazon price (when imported);
 - the lowest current **cash** price;
 - which store is cheapest;
 - how many enabled stores are currently matched;
 - the last observation time;
 - an optional cached cover.
 
-DMM points and BOOK☆WALKER coins can be displayed beside the cash price, but they do **not** reduce the value used for **Lowest cash price**.
+DMM points, BOOK☆WALKER coins, and Amazon points can be displayed beside the cash price, but they do **not** reduce the value used for **Lowest cash price**.
 
 ### Refresh prices and covers
 
@@ -354,13 +360,13 @@ Imports one saved wishlist HTML file.
 
 Duplicate detection is based on same-store product identity, not fuzzy title matching.
 
-## Import 3-store folder…
+## Import HTML folder…
 
 Scans a folder for recognizable BookLive, BOOK☆WALKER and DMM wishlist HTML files and imports them.
 
 ## Add from URL…
 
-Adds one product manually and checks all three supported stores before saving it.
+Adds one product manually from BookLive / BOOK☆WALKER / DMM and checks those three searchable stores before saving it. Amazon search remains disabled.
 
 ## Find missing matches
 
@@ -663,7 +669,7 @@ No guarantee is made that storefronts will keep the same public markup or permit
 
 # Current limitations
 
-- Amazon support is disabled.
+- Amazon search/discovery is disabled. Amazon phase 1 supports HTML import and direct refresh of already-known Amazon product URLs.
 - Matching is heuristic and intentionally conservative.
 - Cover images are not used for identity matching.
 - Storefront HTML/search markup can change without warning.
@@ -698,3 +704,48 @@ Please avoid posting signed-in wishlist HTML publicly. If an HTML sample is requ
 - Fixed the no-cover table layout: rows no longer collapse to a single 24 px line while price/timestamp cells contain multiple lines.
 - When covers are hidden, book titles are wrapped to the visible Book column width and the table row height expands to fit the tallest wrapped visible title, while still reserving room for two-line price/timestamp cells.
 - Tk's Treeview uses one row height for the whole table, so all currently visible rows share the calculated height rather than having independent Excel-style row heights.
+
+
+## 1.8.0 — Amazon phase 1
+
+Amazon is now present in the comparison table, but intentionally remains much more restricted than the other three stores.
+
+- Amazon **search/discovery remains disabled**.
+- Amazon books can be imported from saved Amazon.co.jp Kindle wishlist HTML.
+- Amazon books can also be imported from saved **電子書籍の司書さん** (`k.xpg.jp/my/list.fcgi`) HTML.
+- The HTML-folder importer now processes every recognized HTML file in the folder instead of only the first file for each store. This allows multi-page saved lists such as page 1 / page 2 exports.
+- Amazon ASIN is used as the stable same-store product identity.
+- Imported Amazon product URLs are normalized to `https://www.amazon.co.jp/dp/<ASIN>`.
+- Once an Amazon URL is known, **Update prices** may fetch that exact Amazon product page to refresh cash price, points, and cover when Amazon's page is readable.
+- Amazon product-page refresh failures (including Amazon blocking automated requests) leave the existing association intact and are reported in Activity.
+- **Find missing matches never searches Amazon.** An Amazon-only imported book may, however, search BookLive, BOOK☆WALKER, and DMM.
+- Amazon cross-store reconciliation uses a stricter threshold than ordinary matching.
+- For matching only, the app can remove a likely trailing Amazon publisher/imprint tag such as `(電撃コミックスNEXT)` or `(バンブーコミックス 異世界BC)`.
+- Parentheses are **not** removed generically. A terminal `(2)`, `（２）`, edition marker, or other non-publisher parenthetical is preserved.
+- If a volume number is detected on either side of an Amazon reconciliation, both sides must expose the same volume before an automatic merge is allowed.
+- Manual **Add from URL…** and manual Amazon URL editing remain disabled in this phase.
+- Amazon records in shared-list / shared-history imports are currently skipped so Amazon cannot enter the database through a non-HTML sharing path yet.
+
+### 電子書籍の司書さん price handling
+
+The site can display an effective value such as `￥327` while also showing `(￥330-3pt)`.
+
+Book Sale Notification stores that example as:
+
+- cash price: `¥330`
+- Amazon points: `3 pt`
+
+The cash price, not the after-points effective value, participates in **Lowest cash price**.
+
+### Shared-file security hardening
+
+Shared `.bscshare` and `.bschistory` files are treated as untrusted input.
+
+- imported store URLs are validated against the claimed store;
+- malformed or wrong-domain records are rejected;
+- Amazon sharing records are skipped during phase 1;
+- stored URLs are validated again before opening them in the browser;
+- the Edit URL **Open** button also validates the URL before launching it;
+- direct manual URL writes are restricted to the supported store/product URL formats.
+
+Editing a shared file or local database therefore does not make an arbitrary URL trusted merely because its `store` field says BookLive, DMM, BOOK☆WALKER, or Amazon.
