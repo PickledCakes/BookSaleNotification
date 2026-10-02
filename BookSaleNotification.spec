@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_submodules
 a = Analysis(
     ['app.py'], pathex=[], binaries=[], datas=[],
-    hiddenimports=collect_submodules('PIL'), hookspath=[], hooksconfig={},
+    hiddenimports=collect_submodules('PIL') + ['clr'], hookspath=[], hooksconfig={},
     runtime_hooks=[], excludes=[], noarchive=False, optimize=0,
 )
 pyz = PYZ(a.pure)
