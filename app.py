@@ -2481,23 +2481,219 @@ class App(tk.Tk):
         bid=self.selected()
         if not bid:
             messagebox.showinfo("Select a book","Select a book first."); return
+        if Figure is None or FigureCanvasTkAgg is None:
+            messagebox.showerror("Price history","Matplotlib is not available in this build.")
+            return
         book=self.db.cx.execute("SELECT title FROM books WHERE id=?",(bid,)).fetchone()
-        rows=self.db.history_for_book(bid)
-        w=tk.Toplevel(self); w.title("Price history — "+book["title"]); w.geometry("900x500")
-        w.resizable(False,False)
-        cols=("date","store","price","list","reward","source")
-        t=ttk.Treeview(w,columns=cols,show="headings")
-        for c,h,width in [("date","Observed",165),("store","Store",130),("price","Cash price",100),
-                          ("list","List price",100),("reward","Reward",130),("source","Source",130)]:
-            t.heading(c,text=h); t.column(c,width=width,anchor="center")
-        for r in rows:
-            reward = (f"{r['reward_pct']:g}% pt" if r["reward_pct"] else
-                      f"{r['reward_value']} coin/pt" if r["reward_value"] else "")
-            t.insert("","end",values=(r["observed_at"],r["store"],
-                     f"¥{r['price']:,}" if r["price"] is not None else "",
-                     f"¥{r['list_price']:,}" if r["list_price"] is not None else "",
-                     reward,r["provenance"]))
-        t.pack(fill="both",expand=True,padx=10,pady=10)
+        if not book:return
+        w=self._single_window(("history",bid),"Price history — "+book["title"],"1180x780",resizable=True)
+        if w is None:return
+        w.minsize(900,620)
+
+        enabled=self.enabled_stores()
+        all_rows=[dict(r) for r in self.db.history_for_book(bid) if r["store"] in enabled]
+        for r in all_rows:
+            try:r["_dt"]=datetime.fromisoformat(str(r["observed_at"]).replace("Z","+00:00")).replace(tzinfo=None)
+            except Exception:
+                try:r["_dt"]=datetime.strptime(str(r["observed_at"])[:19],"%Y-%m-%d %H:%M:%S")
+                except Exception:r["_dt"]=datetime.now()
+        all_rows.sort(key=lambda r:r["_dt"])
+        offer_now={r["store"]:dict(r) for r in self.db.cx.execute(
+            "SELECT store,price,list_price FROM offers WHERE book_id=?",(bid,)).fetchall() if r["store"] in enabled}
+
+        outer=ttk.Frame(w,padding=10); outer.pack(fill="both",expand=True)
+        ttk.Label(outer,text=book["title"],font=("Segoe UI",12,"bold"),wraplength=1100).pack(anchor="w",pady=(0,6))
+        if not enabled:
+            ttk.Label(outer,text="No stores are enabled in Settings. Enable a store to show its saved history.").pack(anchor="w")
+            return
+
+        controls=ttk.Frame(outer); controls.pack(fill="x",pady=(0,6))
+        range_var=tk.StringVar(value="6m")
+        ranges=[("1 Month","1m"),("3 Months","3m"),("6 Months","6m"),("1 Year","1y"),("All","all")]
+        store_vars={s:tk.BooleanVar(value=True) for s in enabled}
+        show_list=tk.BooleanVar(value=False)
+
+        notebook=ttk.Notebook(outer); notebook.pack(fill="both",expand=True)
+        graph_tab=ttk.Frame(notebook); data_tab=ttk.Frame(notebook)
+        notebook.add(graph_tab,text="Graph"); notebook.add(data_tab,text="Data")
+
+        graph_host=ttk.Frame(graph_tab); graph_host.pack(fill="both",expand=True)
+        summary_host=ttk.Frame(graph_tab); summary_host.pack(fill="x",pady=(6,0))
+
+        fig=Figure(figsize=(10,5),dpi=100)
+        ax=fig.add_subplot(111)
+        canvas=FigureCanvasTkAgg(fig,master=graph_host)
+        canvas.get_tk_widget().pack(fill="both",expand=True)
+        toolbar=NavigationToolbar2Tk(canvas,graph_host,pack_toolbar=False)
+        toolbar.update(); toolbar.pack(fill="x")
+
+        summary_cols=("store","current","low","high","avg","changed")
+        summary=ttk.Treeview(summary_host,columns=summary_cols,show="headings",height=max(1,len(enabled)))
+        for col,label,width in (("store","Store",145),("current","Current",100),("low","Lowest",100),
+                                ("high","Highest",100),("avg","Average",100),("changed","Last changed",175)):
+            summary.heading(col,text=label); summary.column(col,width=width,anchor="center")
+        summary.pack(fill="x")
+
+        data_controls=ttk.Frame(data_tab,padding=(4,4)); data_controls.pack(fill="x")
+        changes_only=tk.BooleanVar(value=True)
+        data_cols=("date","store","price","list","reward","source")
+        data_tree=ttk.Treeview(data_tab,columns=data_cols,show="headings")
+        for col,label,width in (("date","Observed",175),("store","Store",140),("price","Cash price",105),
+                                ("list","List price",105),("reward","Reward",140),("source","Source",130)):
+            data_tree.heading(col,text=label); data_tree.column(col,width=width,anchor="center")
+        data_sy=ttk.Scrollbar(data_tab,orient="vertical",command=data_tree.yview)
+        data_tree.configure(yscrollcommand=data_sy.set)
+        data_tree.pack(side="left",fill="both",expand=True,padx=(4,0),pady=(0,4))
+        data_sy.pack(side="right",fill="y",pady=(0,4))
+
+        def collapsed(store):
+            rows=[r for r in all_rows if r["store"]==store]
+            out=[]; prev_key=None; prev_price=None
+            for r in rows:
+                key=(r.get("price"),r.get("list_price"))
+                if not out or key!=prev_key:
+                    item=dict(r); item["_previous_price"]=prev_price
+                    out.append(item)
+                    prev_key=key
+                if r.get("price") is not None:prev_price=r.get("price")
+            return out
+
+        def cutoff_for(value):
+            now=datetime.now()
+            return {"1m":now-timedelta(days=31),"3m":now-timedelta(days=92),
+                    "6m":now-timedelta(days=183),"1y":now-timedelta(days=366)}.get(value)
+
+        def range_points(points):
+            cutoff=cutoff_for(range_var.get())
+            if cutoff is None:return list(points)
+            before=[p for p in points if p["_dt"]<cutoff]
+            after=[p for p in points if p["_dt"]>=cutoff]
+            if before:after.insert(0,before[-1])
+            return after
+
+        hover={"artists":[],"annotation":None}
+        def render_graph():
+            ax.clear(); hover["artists"]=[]
+            mode=self.db.get_setting("appearance","system")
+            dark=mode=="dark"
+            fig.patch.set_facecolor("#121212" if dark else "white")
+            ax.set_facecolor("#1b1b1b" if dark else "white")
+            fg="#f2f2f2" if dark else "#222222"
+            grid="#444444" if dark else "#dddddd"
+            ax.tick_params(colors=fg)
+            for spine in ax.spines.values():spine.set_color(grid)
+            ax.grid(True,alpha=.35)
+            ax.set_ylabel("Price (¥)",color=fg)
+            ax.set_title("Cash price history",color=fg,pad=10)
+
+            visible_values=[]
+            plotted=False
+            summary.delete(*summary.get_children())
+            for store in enabled:
+                pts_all=collapsed(store)
+                pts=range_points(pts_all)
+                price_pts=[p for p in pts if p.get("price") is not None]
+                stats_pts=[p for p in pts if p.get("price") is not None]
+                if stats_pts:
+                    values=[int(p["price"]) for p in stats_pts]
+                    current=offer_now.get(store,{}).get("price")
+                    low=min(values); high=max(values); avg=round(sum(values)/len(values))
+                    last_change=pts_all[-1]["_dt"].strftime("%Y-%m-%d %H:%M") if pts_all else ""
+                    summary.insert("","end",values=(store,
+                        f"¥{current:,}" if current is not None else "—",
+                        f"¥{low:,}",f"¥{high:,}",f"¥{avg:,}",last_change))
+                else:
+                    summary.insert("","end",values=(store,"—","—","—","—","—"))
+
+                if not store_vars[store].get() or not price_pts:continue
+                xs=[p["_dt"] for p in price_pts]; ys=[p["price"] for p in price_pts]
+                line,=ax.step(xs,ys,where="post",label=store,linewidth=1.8)
+                scatter=ax.scatter(xs,ys,s=22,color=line.get_color(),zorder=3,picker=6)
+                hover["artists"].append((scatter,store,price_pts))
+                visible_values.extend(ys); plotted=True
+
+                if show_list.get():
+                    list_pts=[p for p in pts if p.get("list_price") is not None]
+                    if list_pts:
+                        ax.step([p["_dt"] for p in list_pts],[p["list_price"] for p in list_pts],
+                                where="post",linestyle="--",alpha=.55,color=line.get_color(),
+                                label=f"{store} regular")
+                        visible_values.extend([p["list_price"] for p in list_pts])
+
+            if visible_values:
+                lo=min(visible_values); hi=max(visible_values); span=max(1,hi-lo)
+                step=100 if span<=3000 and hi<=5000 else (500 if span<=12000 else 1000)
+                ymin=max(0,(int(lo)//step)*step-step)
+                ymax=((int(hi)+step-1)//step)*step+step
+                if ymax<=ymin:ymax=ymin+step*4
+                ax.set_ylim(ymin,ymax)
+                ax.yaxis.set_major_locator(MultipleLocator(step))
+                ax.yaxis.set_major_formatter(FuncFormatter(lambda y,_:f"¥{int(y):,}"))
+            locator=mdates.AutoDateLocator(minticks=4,maxticks=10)
+            ax.xaxis.set_major_locator(locator); ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+            if plotted:
+                leg=ax.legend(loc="best",fontsize=8)
+                if leg:
+                    for text_item in leg.get_texts():text_item.set_color(fg)
+                    leg.get_frame().set_alpha(.85)
+            else:
+                ax.text(.5,.5,"No visible price history for this range.",ha="center",va="center",
+                        transform=ax.transAxes,color=fg)
+            hover["annotation"]=ax.annotate("",xy=(0,0),xytext=(12,12),textcoords="offset points",
+                bbox=dict(boxstyle="round",fc="white",alpha=.95),arrowprops=dict(arrowstyle="->"))
+            hover["annotation"].set_visible(False)
+            fig.autofmt_xdate(); fig.tight_layout()
+            canvas.draw_idle()
+
+        def hover_move(event):
+            ann=hover.get("annotation")
+            if ann is None or event.inaxes is not ax:return
+            for artist,store,pts in hover["artists"]:
+                contains,info=artist.contains(event)
+                if contains and info.get("ind"):
+                    idx=int(info["ind"][0]); p=pts[idx]
+                    price=p.get("price"); previous=p.get("_previous_price"); regular=p.get("list_price")
+                    lines=[store,p["_dt"].strftime("%Y-%m-%d %H:%M"),f"¥{price:,}" if price is not None else "Price unavailable"]
+                    if previous is not None and price is not None and previous!=price:
+                        lines.append(f"Was ¥{previous:,}")
+                    ref=regular if regular is not None and price is not None and regular>price else previous
+                    if ref is not None and price is not None and ref>price:
+                        lines.append(f"{(ref-price)*100/ref:.0f}% off")
+                    ann.xy=(mdates.date2num(p["_dt"]),price)
+                    ann.set_text("\n".join(lines)); ann.set_visible(True)
+                    canvas.draw_idle(); return
+            if ann.get_visible():
+                ann.set_visible(False); canvas.draw_idle()
+
+        canvas.mpl_connect("motion_notify_event",hover_move)
+
+        def refresh_data():
+            data_tree.delete(*data_tree.get_children())
+            for store in enabled:
+                source=collapsed(store) if changes_only.get() else [r for r in all_rows if r["store"]==store]
+                for r in reversed(source):
+                    reward=(f"{r['reward_pct']:g}% pt" if r.get("reward_pct") else
+                            f"{r['reward_value']} coin/pt" if r.get("reward_value") else "")
+                    data_tree.insert("","end",values=(
+                        r["_dt"].strftime("%Y-%m-%d %H:%M:%S"),store,
+                        f"¥{r['price']:,}" if r.get("price") is not None else "",
+                        f"¥{r['list_price']:,}" if r.get("list_price") is not None else "",
+                        reward,r.get("provenance","")))
+
+        for label,value in ranges:
+            ttk.Radiobutton(controls,text=label,variable=range_var,value=value,
+                            command=render_graph).pack(side="left",padx=(0,4))
+        ttk.Separator(controls,orient="vertical").pack(side="left",fill="y",padx=6)
+        for store in enabled:
+            ttk.Checkbutton(controls,text=store,variable=store_vars[store],
+                            command=render_graph).pack(side="left",padx=(0,5))
+        ttk.Checkbutton(controls,text="Show regular/list price",variable=show_list,
+                        command=render_graph).pack(side="right")
+        ttk.Checkbutton(data_controls,text="Show price changes only",variable=changes_only,
+                        command=refresh_data).pack(side="left")
+        ttk.Label(data_controls,text="All saved observations remain in the database.").pack(side="left",padx=10)
+
+        render_graph(); refresh_data()
 
     def auto_backup(self,operation="operation"):
         d=DATA_DIR/"backups"; d.mkdir(parents=True,exist_ok=True)
