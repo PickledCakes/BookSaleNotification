@@ -1147,6 +1147,7 @@ class App(tk.Tk):
         self._tray_icon=None
         self._tray_thread=None
         self._tray_ready=None
+        self._bw_health_schedule_started=False
         self.minsize(MAIN_MIN_WIDTH,MAIN_MIN_HEIGHT)
         self._restore_window_geometry()
         self.protocol("WM_DELETE_WINDOW",self._on_close)
@@ -1171,7 +1172,7 @@ class App(tk.Tk):
         # If this user previously had a BOOK☆WALKER session, verify it shortly
         # after startup and then every six hours while the app remains running.
         if load_bookwalker_cookies():
-            self.after(8000,self._scheduled_bookwalker_health_check)
+            self._start_bookwalker_health_schedule()
 
     def _restore_window_geometry(self):
         saved=self.db.get_setting("main_window_geometry",MAIN_DEFAULT_GEOMETRY)
@@ -2451,6 +2452,11 @@ class App(tk.Tk):
             self.after(0,finish)
         threading.Thread(target=work,daemon=True).start()
 
+    def _start_bookwalker_health_schedule(self):
+        if self._bw_health_schedule_started:return
+        self._bw_health_schedule_started=True
+        self.after(8000,self._scheduled_bookwalker_health_check)
+
     def _scheduled_bookwalker_health_check(self):
         state=self.db.get_setting(
             "bookwalker_session_state","valid" if load_bookwalker_cookies() else "never")
@@ -2508,6 +2514,7 @@ class App(tk.Tk):
                 if code==0 and cookies:
                     if status_var is not None: status_var.set("Signed in")
                     self.db.set_setting("bookwalker_session_state","valid")
+                    self._start_bookwalker_health_schedule()
                     try:
                         delay=float(self.db.get_setting("request_delay_seconds","1.25"))
                         self.providers=live_providers(delay,self.log,cookies)
