@@ -41,6 +41,121 @@ def app_data_dir():
     return Path(__file__).resolve().parent
 DATA_DIR=app_data_dir()
 DB_PATH=DATA_DIR/"books.db"
+BW_SESSION_PATH=DATA_DIR/"bookwalker_session.dat"
+BW_WEBVIEW_DIR=DATA_DIR/"bookwalker_webview"
+BW_LOGIN_ERROR_PATH=DATA_DIR/"bookwalker_login_error.txt"
+
+def _dpapi_crypt(data, protect=True):
+    """Protect BOOK☆WALKER session cookies with the current Windows user account."""
+    if os.name!="nt":
+        return data
+    import ctypes
+    from ctypes import wintypes
+    class DATA_BLOB(ctypes.Structure):
+        _fields_=[("cbData",wintypes.DWORD),("pbData",ctypes.POINTER(ctypes.c_byte))]
+    src=ctypes.create_string_buffer(data)
+    in_blob=DATA_BLOB(len(data),ctypes.cast(src,ctypes.POINTER(ctypes.c_byte)))
+    out_blob=DATA_BLOB()
+    if protect:
+        ok=ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(in_blob),None,None,None,None,0,ctypes.byref(out_blob))
+    else:
+        ok=ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob),None,None,None,None,0,ctypes.byref(out_blob))
+    if not ok:
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(out_blob.pbData,out_blob.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+
+def save_bookwalker_cookies(records):
+    records=[x for x in (records or []) if x.get("name") and x.get("value")]
+    payload=json.dumps({"version":1,"saved_at":datetime.now().isoformat(timespec="seconds"),
+                        "cookies":records},ensure_ascii=False).encode("utf-8")
+    BW_SESSION_PATH.write_bytes(b"BSNDPAPI1"+_dpapi_crypt(payload,True))
+
+def load_bookwalker_cookies():
+    try:
+        raw=BW_SESSION_PATH.read_bytes()
+        if raw.startswith(b"BSNDPAPI1"):
+            raw=_dpapi_crypt(raw[len(b"BSNDPAPI1"):],False)
+        obj=json.loads(raw.decode("utf-8"))
+        return [x for x in (obj.get("cookies") or [])
+                if isinstance(x,dict) and "bookwalker.jp" in str(x.get("domain") or "").lower()]
+    except Exception:
+        return []
+
+def bookwalker_login_helper():
+    """Run the real BOOK☆WALKER site in a persistent Edge WebView2 profile.
+
+    This helper is launched as a second process so pywebview can own that process's
+    main GUI thread without conflicting with Tk. The app never sees the password;
+    after BOOK☆WALKER confirms login, only its session cookies are exported.
+    """
+    try:
+        if BW_LOGIN_ERROR_PATH.exists(): BW_LOGIN_ERROR_PATH.unlink()
+    except Exception:
+        pass
+    try:
+        import webview
+        result={"success":False}
+
+        def capture(window):
+            try:
+                current=window.get_current_url() or ""
+                host=(urlparse(current).hostname or "").lower()
+                if host!="bookwalker.jp" and not host.endswith(".bookwalker.jp"):
+                    return False
+                signed_in=bool(window.evaluate_js(
+                    "typeof window.BW_IS_LOGIN !== 'undefined' && window.BW_IS_LOGIN === true"))
+                if not signed_in:
+                    return False
+                records=[]
+                for jar in window.get_cookies() or []:
+                    try:
+                        items=jar.items()
+                    except Exception:
+                        continue
+                    for name,morsel in items:
+                        domain=(morsel["domain"] or ".bookwalker.jp").strip()
+                        if "bookwalker.jp" not in domain.lower():
+                            continue
+                        records.append({"name":name,"value":morsel.value,
+                                        "domain":domain,"path":(morsel["path"] or "/")})
+                if not records:
+                    return False
+                save_bookwalker_cookies(records)
+                result["success"]=True
+                return True
+            except Exception:
+                return False
+
+        def on_loaded(window):
+            if capture(window):
+                # Login is complete; close automatically so the user does not have
+                # to understand or manually export cookies.
+                window.destroy()
+
+        def on_closing(window=None):
+            if window is not None:
+                capture(window)
+
+        webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"]=False
+        window=webview.create_window(
+            "BOOK☆WALKER Sign In — sign in normally; this window closes when connected",
+            "https://bookwalker.jp/",width=1050,height=780,resizable=True)
+        window.events.loaded += on_loaded
+        window.events.closing += on_closing
+        webview.start(gui="edgechromium",private_mode=False,storage_path=str(BW_WEBVIEW_DIR))
+        return 0 if result["success"] else 2
+    except Exception as e:
+        try:
+            BW_LOGIN_ERROR_PATH.write_text(f"{type(e).__name__}: {e}",encoding="utf-8")
+        except Exception:
+            pass
+        return 1
+
 STORES = ("BookLive", "BOOK☆WALKER", "DMM", "Amazon")
 SEARCH_STORES = ("BookLive", "BOOK☆WALKER", "DMM")
 MANUAL_URL_STORES = STORES
@@ -131,6 +246,16 @@ JA_UI={
     "Disabled stores are hidden and skipped by matching, updates and cover fetching.":
         "無効にしたストアは非表示になり、照合・更新・表紙取得を行いません。",
     "Amazon (HTML import + direct price refresh only)":"Amazon（HTML読込・直接価格更新のみ）",
+    "BOOK☆WALKER account":"BOOK☆WALKERアカウント",
+    "Sign in to BOOK☆WALKER":"BOOK☆WALKERにログイン",
+    "Saved BOOK☆WALKER session":"BOOK☆WALKERログイン保存済み",
+    "Not signed in — cash prices still work; coins are hidden.":"未ログイン — 現金価格は取得できますが、コインは表示しません。",
+    "Opening BOOK☆WALKER sign-in…":"BOOK☆WALKERのログイン画面を開いています…",
+    "BOOK☆WALKER connected":"BOOK☆WALKERに接続しました",
+    "BOOK☆WALKER sign-in was not completed.":"BOOK☆WALKERへのログインが完了しませんでした。",
+    "Use nightly / pre-release versions (test builds)":"ナイトリー / プレリリース版（テストビルド）を使用する",
+    "Off = stable releases only. Test builds may contain unfinished fixes.":
+        "オフの場合は安定版のみです。テストビルドには未完成の修正が含まれる場合があります。",
     "Automatic update interval (hours):":"自動更新間隔（時間）:",
     "Minimum delay between store requests (seconds):":"ストアへの最低アクセス間隔（秒）:",
     "Appearance:":"外観:","Recently Deleted retention (days):":"最近削除した項目の保持日数:",
@@ -958,7 +1083,8 @@ class App(tk.Tk):
         UI_LANG=self.db.get_setting("ui_language","en")
         self.title(APP_NAME)
         self.current_list_id=1; self.archived_view=False
-        self.providers=live_providers(float(self.db.get_setting("request_delay_seconds","1.25")), self.log)
+        self.providers=live_providers(float(self.db.get_setting("request_delay_seconds","1.25")),
+                                      self.log,load_bookwalker_cookies())
         self._build()
         self.apply_theme()
         # Let Tk finish laying out the panes before calculating column widths/wrapping.
@@ -2131,8 +2257,60 @@ class App(tk.Tk):
         suffix=("\n\n"+"\n".join(extra)) if extra else ""
         messagebox.showinfo("History imported",f"Merged {n} historical observations.{suffix}")
 
+    def _start_bookwalker_signin(self,status_var=None,button=None):
+        if os.name!="nt":
+            messagebox.showerror("BOOK☆WALKER","BOOK☆WALKER sign-in is currently available in the Windows build.")
+            return
+        if button is not None:
+            try: button.configure(state="disabled")
+            except Exception: pass
+        if status_var is not None: status_var.set("Opening BOOK☆WALKER sign-in…")
+        try:
+            if getattr(sys,"frozen",False):
+                cmd=[sys.executable,"--bookwalker-login-helper"]
+            else:
+                cmd=[sys.executable,str(Path(__file__).resolve()),"--bookwalker-login-helper"]
+            proc=subprocess.Popen(cmd,cwd=str(DATA_DIR),
+                                  creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+        except Exception as e:
+            if button is not None:
+                try: button.configure(state="normal")
+                except Exception: pass
+            messagebox.showerror("BOOK☆WALKER",f"Could not open the sign-in window.\n\n{type(e).__name__}: {e}")
+            return
+
+        def wait_for_login():
+            code=proc.wait()
+            cookies=load_bookwalker_cookies()
+            def finish():
+                if button is not None:
+                    try: button.configure(state="normal")
+                    except Exception: pass
+                if code==0 and cookies:
+                    if status_var is not None: status_var.set("Saved BOOK☆WALKER session")
+                    try:
+                        delay=float(self.db.get_setting("request_delay_seconds","1.25"))
+                        self.providers=live_providers(delay,self.log,cookies)
+                    except Exception:
+                        pass
+                    self.log("[BOOK☆WALKER] Signed-in session connected; future updates can use account coin values")
+                    messagebox.showinfo("BOOK☆WALKER","BOOK☆WALKER connected. Future price updates will use the signed-in session for coin values.")
+                elif code==2:
+                    if status_var is not None: status_var.set("Not signed in — cash prices still work; coins are hidden.")
+                    messagebox.showinfo("BOOK☆WALKER","BOOK☆WALKER sign-in was not completed.")
+                else:
+                    detail=""
+                    try: detail=BW_LOGIN_ERROR_PATH.read_text(encoding="utf-8").strip()
+                    except Exception: pass
+                    msg="Could not open the BOOK☆WALKER sign-in window. The Microsoft Edge WebView2 Runtime is required."
+                    if detail: msg+=f"\n\n{detail}"
+                    if status_var is not None: status_var.set("Not signed in — cash prices still work; coins are hidden.")
+                    messagebox.showerror("BOOK☆WALKER",msg)
+            self.after(0,finish)
+        threading.Thread(target=wait_for_login,daemon=True).start()
+
     def settings_dialog(self):
-        w=tk.Toplevel(self); w.title("Settings"); w.geometry("590x810"); w.resizable(False,False)
+        w=tk.Toplevel(self); w.title("Settings"); w.geometry("620x900"); w.resizable(False,False)
         f=ttk.Frame(w,padding=16); f.pack(fill="both",expand=True)
         notify=tk.StringVar(value=self.db.get_setting("notification_rule","any_sale"))
         threshold=tk.StringVar(value=self.db.get_setting("deal_threshold","20"))
@@ -2189,6 +2367,13 @@ class App(tk.Tk):
             self.apply_store_columns(); self.refresh()
         ttk.Checkbutton(f,text="BookLive",variable=store_booklive,command=apply_store_settings).pack(anchor="w")
         ttk.Checkbutton(f,text="BOOK☆WALKER",variable=store_bookwalker,command=apply_store_settings).pack(anchor="w")
+        bw_login=ttk.Frame(f); bw_login.pack(fill="x",padx=(22,0),pady=(2,5))
+        bw_status=tk.StringVar(value=("Saved BOOK☆WALKER session" if load_bookwalker_cookies()
+                                      else "Not signed in — cash prices still work; coins are hidden."))
+        bw_button=ttk.Button(bw_login,text="Sign in to BOOK☆WALKER")
+        bw_button.pack(side="left")
+        ttk.Label(bw_login,textvariable=bw_status,wraplength=330).pack(side="left",padx=(10,0))
+        bw_button.configure(command=lambda:self._start_bookwalker_signin(bw_status,bw_button))
         ttk.Checkbutton(f,text="DMM",variable=store_dmm,command=apply_store_settings).pack(anchor="w")
         ttk.Checkbutton(f,text="Amazon (HTML import + direct price refresh only)",variable=store_amazon,command=apply_store_settings).pack(anchor="w")
         row2=ttk.Frame(f); row2.pack(fill="x",pady=8)
@@ -2199,9 +2384,9 @@ class App(tk.Tk):
         ttk.Entry(row3,textvariable=reqdelay,width=7).pack(side="left",padx=6)
         ttk.Checkbutton(f,text="Check for new versions on startup (never installs automatically)",
                         variable=check_updates).pack(anchor="w",pady=(5,2))
-        ttk.Checkbutton(f,text="Use pre-release versions (test builds)",
+        ttk.Checkbutton(f,text="Use nightly / pre-release versions (test builds)",
                         variable=use_prerelease).pack(anchor="w",pady=(2,0))
-        ttk.Label(f,text="Pre-release builds may contain unfinished fixes. Leave this off for stable releases only.",
+        ttk.Label(f,text="Off = stable releases only. Test builds may contain unfinished fixes.",
                   wraplength=500).pack(anchor="w",pady=(0,4))
         ttk.Separator(f).pack(fill="x",pady=(8,6))
         ar=ttk.Frame(f); ar.pack(fill="x"); ttk.Label(ar,text="Appearance:").pack(side="left")
@@ -2228,7 +2413,7 @@ class App(tk.Tk):
             chosen_appearance=appearance_display.get(); appearance.set({"システム":"system","ライト":"light","ダーク":"dark"}.get(chosen_appearance,chosen_appearance))
             self.db.set_setting("appearance",appearance.get()); self.db.set_setting("trash_retention_days",retention.get())
             self.apply_theme()
-            try:self.providers=live_providers(float(reqdelay.get()), self.log)
+            try:self.providers=live_providers(float(reqdelay.get()), self.log,load_bookwalker_cookies())
             except:pass
             w.destroy()
         savebar=ttk.Frame(w,padding=(16,4,16,12)); savebar.pack(fill="x",side="bottom")
@@ -2589,4 +2774,6 @@ Start-Process -FilePath (Join-Path $install $exe) -WorkingDirectory $install
         for i,(_,k) in enumerate(data): self.tree.move(k,"",i)
 
 if __name__=="__main__":
+    if "--bookwalker-login-helper" in sys.argv:
+        raise SystemExit(bookwalker_login_helper())
     App().mainloop()
