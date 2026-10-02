@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from urllib.parse import urlparse
 import tkinter as tk
+import tkinter.font as tkfont
 import urllib.request
 from io import BytesIO
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -22,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.7.1"
-APP_VERSION = "1.7.1"
+APP_NAME = "Book Sale Notification 1.7.2"
+APP_VERSION = "1.7.2"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -37,6 +38,191 @@ DATA_DIR=app_data_dir()
 DB_PATH=DATA_DIR/"books.db"
 STORES = ("BookLive", "BOOK☆WALKER", "DMM")
 STORE_KEYS = {"BookLive":"booklive", "BOOK☆WALKER":"bookwalker", "DMM":"dmm"}
+
+UI_LANG="en"
+JA_UI={
+    "Book Sale Notification":"Book Sale Notification",
+    "Settings":"設定","Check for Updates":"アップデート確認","Recently Deleted":"最近削除した項目",
+    "Backup / Share":"バックアップ / 共有","Import HTML…":"HTMLを読み込む…",
+    "Add from URL…":"URLから追加…","Import 3-store folder…":"3ストアHTMLフォルダを読み込む…",
+    "BookLive + BOOK☆WALKER + DMM active • Amazon intentionally disabled":
+        "BookLive + BOOK☆WALKER + DMM 対応 • Amazon は現在無効",
+    "Search:":"検索:","Delete":"削除","History":"履歴","Mark purchased":"購入済みにする",
+    "Edit store URLs":"ストアURLを編集","Find missing matches":"未登録ストアを検索","Update prices":"価格を更新",
+    "Book":"書籍","Lowest cash price":"現金最安値","Matched":"一致数","Cover":"表紙",
+    "Activity":"アクティビティ","Clear":"クリア","My List":"マイリスト","Archived":"アーカイブ",
+    "Match Results":"照合結果","Close":"閉じる","Copy Log":"ログをコピー",
+    "Reason":"理由","Deleted":"削除日時","Restore selected":"選択項目を復元",
+    "Permanently delete selected":"選択項目を完全に削除",
+    "New list":"新しいリスト","List name:":"リスト名:",
+    "Select a book":"書籍を選択","Select a book first.":"先に書籍を選択してください。",
+    "Select a book first, then click Edit store URLs.":"先に書籍を選択してから「ストアURLを編集」を押してください。",
+    "Select one or more books first.":"1冊以上の書籍を選択してください。",
+    "Delete books":"書籍を削除","Update":"更新","Updates":"アップデート",
+    "Update selected books":"選択した書籍を更新","Start update":"更新開始",
+    "Update covers only":"表紙のみ更新","Update books without price":"価格未取得のみ更新",
+    "Update everything selected":"選択したすべてを更新",
+    "Fetch product pages only to refresh/cache cover images. Prices and price history are not changed.":
+        "商品ページから表紙のみを更新・キャッシュします。価格と価格履歴は変更しません。",
+    "Only update matched store offers whose current price is missing.":
+        "現在価格が未取得の一致済みストアだけを更新します。",
+    "Refresh price, rewards and cover for every matched offer on the selected books.":
+        "選択した書籍の一致済みストアについて、価格・特典・表紙をすべて更新します。",
+    "Choose what should be refreshed. Only enabled stores with an existing product URL are contacted.":
+        "更新内容を選択してください。既存の商品URLがある有効なストアだけにアクセスします。",
+    "No matched product pages meet the selected update mode.":"選択した更新条件に該当する商品ページがありません。",
+    "Edit store URLs":"ストアURLを編集",
+    "Current database URLs for the three active stores. Editing a URL manually locks that store match.":
+        "3ストアの現在の登録URLです。URLを手動編集すると、そのストアの照合結果は固定されます。",
+    "Open":"開く","Save changes":"変更を保存","Invalid store URL":"無効なストアURL",
+    "Add book from store URL":"ストアURLから書籍を追加",
+    "Add from BookLive / BOOK☆WALKER / DMM URL":"BookLive / BOOK☆WALKER / DMM のURLから追加",
+    "Paste one product URL. The app will fetch that exact product, then search the other two stores and fetch their product pages before adding anything to the list.":
+        "商品URLを1つ貼り付けてください。その商品を取得後、残り2ストアも検索し、商品ページを取得してからリストに追加します。",
+    "Fetch all stores and add":"3ストアを確認して追加","Cancel":"キャンセル",
+    "Paste a valid BookLive, BOOK☆WALKER or DMM Books product URL.":
+        "有効なBookLive、BOOK☆WALKER、またはDMM Booksの商品URLを貼り付けてください。",
+    "Import wishlist HTML":"ウィッシュリストHTMLを読み込む",
+    "Choose folder containing DMM, BookLive and BOOK☆WALKER HTML files":
+        "DMM・BookLive・BOOK☆WALKERのHTMLが入ったフォルダを選択",
+    "Import complete":"読み込み完了","Import failed":"読み込み失敗","Folder import":"フォルダ読み込み",
+    "Price history — ":"価格履歴 — ","Observed":"取得日時","Store":"ストア","Cash price":"現金価格",
+    "List price":"通常価格","Reward":"特典","Source":"取得元",
+    "Backup, restore & sharing":"バックアップ・復元・共有","Private recovery":"個人用バックアップ",
+    "Save Backup As…":"バックアップを保存…","Restore Backup…":"バックアップを復元…",
+    "Portable sharing":"共有","Export shared book list…":"共有用書籍リストを書き出す…",
+    "View / import shared book list…":"共有用書籍リストを表示 / 読み込む…",
+    "Export price history…":"価格履歴を書き出す…","Import price history…":"価格履歴を読み込む…",
+    "Calibre library":"Calibreライブラリ","Sync purchased books from Calibre CSV…":"Calibre CSVから購入済みを同期…",
+    "Share files contain public book/store data only — no source HTML, cookies, login state or account data.":
+        "共有ファイルには公開されている書籍・ストア情報のみが含まれます。HTML、Cookie、ログイン情報、アカウント情報は含みません。",
+    "Backup":"バックアップ","Backup saved.":"バックアップを保存しました。",
+    "Restore":"復元","Restore this backup? Current state was safety-backed-up first.":
+        "このバックアップを復元しますか？現在の状態は先に安全バックアップされています。",
+    "Shared List — View only":"共有リスト — 表示のみ","Known stores":"登録ストア",
+    "Import All":"すべて読み込む","Close without importing":"読み込まず閉じる",
+    "Exported":"書き出し完了","History imported":"履歴の読み込み完了",
+    "Calibre Sync":"Calibre同期","Calibre Sync Preview":"Calibre同期プレビュー",
+    "Select Calibre CSV export":"CalibreのCSV書き出しを選択",
+    "CSV must contain an 'identifiers' column.":"CSVには 'identifiers' 列が必要です。",
+    "Copy Preview":"プレビューをコピー","Archive matched books":"一致した書籍をアーカイブ",
+    "No active wishlist books matched exact Calibre identifiers.":
+        "有効なウィッシュリスト内にCalibre識別子と完全一致する書籍がありません。",
+    "Notification rule":"通知ルール","Any sale":"セールなら通知","Lowest recorded price":"記録上の最安値",
+    "Good deal":"お得な価格","Good-deal threshold (> %):":"お得判定の割引率 (> %):",
+    "Show direct DMM points / BOOK☆WALKER coins in store price columns":
+        "DMMポイント / BOOK☆WALKERコインを価格欄に表示",
+    "BOOK☆WALKER overseas tax mode (show stored tax-exclusive price when known)":
+        "BOOK☆WALKER海外税モード（取得済みの税抜価格があれば表示）",
+    "Cover display":"表紙表示","Show book covers":"表紙を表示","Cover size:":"表紙サイズ:",
+    "Small":"小","Medium":"中","Large":"大","Stores":"ストア",
+    "Disabled stores are hidden and skipped by matching, updates and cover fetching.":
+        "無効にしたストアは非表示になり、照合・更新・表紙取得を行いません。",
+    "Automatic update interval (hours):":"自動更新間隔（時間）:",
+    "Minimum delay between store requests (seconds):":"ストアへの最低アクセス間隔（秒）:",
+    "Appearance:":"外観:","Recently Deleted retention (days):":"最近削除した項目の保持日数:",
+    "Live matching is accuracy-first. A low-confidence result is left blank rather than attached to the wrong volume.":
+        "照合は正確さを優先します。確信度が低い場合は、誤った巻を登録せず空欄のままにします。",
+    "Save":"保存","System":"システム","Light":"ライト","Dark":"ダーク",
+    "Recently Deleted retention (days):":"最近削除した項目の保持日数:",
+    "Check for Updates":"アップデート確認","Update available":"アップデートがあります",
+    "Update failed":"アップデート失敗","Update check failed":"アップデート確認失敗",
+    "Automatic installation is available in the packaged Windows build.":
+        "自動インストールは配布版Windowsアプリで利用できます。",
+    "GitHub updates are not configured in this build yet.":"このビルドではGitHubアップデートが設定されていません。",
+    "Release asset has no download URL.":"リリースファイルのダウンロードURLがありません。",
+    "Ready":"準備完了","Same":"同額","price unavailable":"価格未取得",
+    "delete":"削除","merge":"統合"
+}
+
+def ui_tr(value):
+    if UI_LANG!="ja" or not isinstance(value,str):
+        return value
+    if value in JA_UI:
+        return JA_UI[value]
+    # Common dynamic UI strings.
+    patterns=[
+        (r"^Update (\d+) selected book\(s\)$", lambda m:f"選択した {m.group(1)} 冊を更新"),
+        (r"^Items are kept for (\d+) days\.$", lambda m:f"項目は {m.group(1)} 日間保持されます。"),
+        (r"^(\d+) canonical books shown • Double-click a store cell to open its public product page$",
+            lambda m:f"{m.group(1)} 冊表示 • ストア欄をダブルクリックすると商品ページを開きます"),
+        (r"^Version (.+) is available\.", lambda m:f"バージョン {m.group(1)} を利用できます。"),
+        (r"^Downloading (.+)…$", lambda m:f"{m.group(1)} をダウンロード中…"),
+        (r"^Searching (.+)…$", lambda m:f"{m.group(1)} を検索中…"),
+        (r"^Reading (.+) product…$", lambda m:f"{m.group(1)} の商品情報を取得中…"),
+        (r"^Updating (\d+)/(\d+) • (.+)$", lambda m:f"更新中 {m.group(1)}/{m.group(2)} • {m.group(3)}"),
+        (r"^VIEW ONLY • (\d+) books • Nothing is imported until you press Import All$",
+            lambda m:f"表示のみ • {m.group(1)} 冊 • 「すべて読み込む」を押すまで変更されません"),
+        (r"^Exported (\d+) books\.$", lambda m:f"{m.group(1)} 冊を書き出しました。"),
+        (r"^Exported (\d+) observations\.$", lambda m:f"{m.group(1)} 件の履歴を書き出しました。"),
+        (r"^Merged (\d+) historical observations\.$", lambda m:f"{m.group(1)} 件の履歴を統合しました。"),
+    ]
+    for pat,fn in patterns:
+        m=re.match(pat,value,re.S)
+        if m:return fn(m)
+    return value
+
+def _install_i18n_hooks():
+    """Translate ordinary Tk/ttk UI text without changing stored data values."""
+    if getattr(_install_i18n_hooks,"done",False): return
+    _install_i18n_hooks.done=True
+
+    def patch_init(cls):
+        original=cls.__init__
+        def wrapped(self,*args,**kwargs):
+            if "text" in kwargs: kwargs["text"]=ui_tr(kwargs["text"])
+            return original(self,*args,**kwargs)
+        cls.__init__=wrapped
+
+    for cls in (ttk.Label,ttk.Button,ttk.Checkbutton,ttk.Radiobutton,tk.Label,tk.Button):
+        patch_init(cls)
+
+    original_heading=ttk.Treeview.heading
+    def heading(self,column,option=None,**kwargs):
+        if "text" in kwargs: kwargs["text"]=ui_tr(kwargs["text"])
+        return original_heading(self,column,option,**kwargs)
+    ttk.Treeview.heading=heading
+
+    original_add=ttk.Notebook.add
+    def add(self,child,**kwargs):
+        if "text" in kwargs: kwargs["text"]=ui_tr(kwargs["text"])
+        return original_add(self,child,**kwargs)
+    ttk.Notebook.add=add
+
+    original_title=tk.Wm.title
+    def title(self,string=None):
+        return original_title(self,ui_tr(string)) if string is not None else original_title(self)
+    tk.Wm.title=title
+
+    for name in ("showinfo","showerror","askyesno","showwarning"):
+        original=getattr(messagebox,name)
+        def make(orig):
+            def wrapped(title,message,*args,**kwargs):
+                return orig(ui_tr(title),ui_tr(message),*args,**kwargs)
+            return wrapped
+        setattr(messagebox,name,make(original))
+
+    for name in ("askopenfilename","asksaveasfilename","askdirectory"):
+        original=getattr(filedialog,name)
+        def make(orig):
+            def wrapped(*args,**kwargs):
+                if "title" in kwargs: kwargs["title"]=ui_tr(kwargs["title"])
+                if "filetypes" in kwargs:
+                    kwargs["filetypes"]=[(ui_tr(label),pat) for label,pat in kwargs["filetypes"]]
+                return orig(*args,**kwargs)
+            return wrapped
+        setattr(filedialog,name,make(original))
+
+    original_askstring=simpledialog.askstring
+    def askstring(title,prompt,*args,**kwargs):
+        return original_askstring(ui_tr(title),ui_tr(prompt),*args,**kwargs)
+    simpledialog.askstring=askstring
+
+class UIStatusVar(tk.StringVar):
+    def set(self,value):
+        super().set(ui_tr(value))
+
+_install_i18n_hooks()
 
 @dataclass
 class Offer:
@@ -545,11 +731,25 @@ class DB:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(APP_NAME); self.geometry("1420x780"); self.minsize(1000,560)
+        self.geometry("1420x780"); self.minsize(1000,560)
         self.db=DB()
+        global UI_LANG
+        UI_LANG=self.db.get_setting("ui_language","en")
+        self.title(APP_NAME)
         self.current_list_id=1; self.archived_view=False
         self.providers=live_providers(float(self.db.get_setting("request_delay_seconds","1.25")), self.log)
         self._build(); self.apply_theme(); self.refresh()
+
+    def toggle_language(self):
+        global UI_LANG
+        UI_LANG="ja" if UI_LANG!="ja" else "en"
+        self.db.set_setting("ui_language",UI_LANG)
+        # Rebuild the visible UI from the same database/session so the change is immediate.
+        for child in list(self.winfo_children()):
+            child.destroy()
+        self._build()
+        self.apply_theme()
+        self.refresh()
 
     def _build(self):
         style=ttk.Style(self)
@@ -557,6 +757,8 @@ class App(tk.Tk):
         except: pass
         top=ttk.Frame(self,padding=10); top.pack(fill="x")
         ttk.Label(top,text="Book Sale Notification",font=("Segoe UI",18,"bold")).pack(side="left")
+        ttk.Button(top,text=("English" if UI_LANG=="ja" else "日本語"),width=8,
+                   command=self.toggle_language).pack(side="left",padx=(12,0))
         ttk.Button(top,text="Settings",command=self.settings_dialog).pack(side="right",padx=4)
         ttk.Button(top,text="Check for Updates",command=self.check_for_updates).pack(side="right",padx=4)
         ttk.Button(top,text="Recently Deleted",command=self.recently_deleted).pack(side="right",padx=4)
@@ -617,7 +819,7 @@ class App(tk.Tk):
         self.activity.configure(yscrollcommand=ay.set)
         ay.pack(side="right",fill="y"); self.activity.pack(side="left",fill="both",expand=True)
 
-        self.status=tk.StringVar(value="Ready")
+        self.status=UIStatusVar(value=ui_tr("Ready"))
         ttk.Label(self,textvariable=self.status,relief="sunken",anchor="w",padding=5).pack(side="bottom",fill="x")
         self.log("Ready — live scraper activity will appear here.")
 
@@ -655,7 +857,7 @@ class App(tk.Tk):
         for c,h,wd in [('kind','Reason',100),('title','Book',580),('date','Deleted',170)]:t.heading(c,text=h);t.column(c,width=wd)
         retention=int(self.db.get_setting('trash_retention_days','14') or 14)
         self.db.cx.execute("DELETE FROM trash WHERE deleted_at < datetime('now',?)",(f'-{retention} days',)); self.db.cx.commit()
-        for r in self.db.cx.execute('SELECT * FROM trash ORDER BY deleted_at DESC'):t.insert('', 'end',iid=str(r['id']),values=(r['kind'],r['title'],r['deleted_at']))
+        for r in self.db.cx.execute('SELECT * FROM trash ORDER BY deleted_at DESC'):t.insert('', 'end',iid=str(r['id']),values=(ui_tr(r['kind']),r['title'],r['deleted_at']))
         t.pack(fill='both',expand=True,padx=10,pady=(10,6))
         def restore():
             for x in t.selection():
@@ -920,20 +1122,57 @@ class App(tk.Tk):
         sizes={"small":(50,70,62,78),"medium":(75,105,87,113),"large":(100,140,112,148)}
         return show,size,sizes.get(size,sizes["medium"])
 
-    def apply_cover_view(self):
+    def apply_cover_view(self, no_cover_rowheight=None):
         show,size,(iw,ih,cw,rh)=self.cover_view()
         self.tree.heading("#0",text="Cover" if show else "")
         self.tree.column("#0",width=cw if show else 0,minwidth=cw if show else 0,
                          stretch=False,anchor="center")
-        ttk.Style(self).configure("Treeview",rowheight=rh if show else 24)
+        # Price cells contain a second line for timestamps. Never collapse no-cover
+        # rows to a single 24px line; use the calculated wrapped-content height.
+        ttk.Style(self).configure("Treeview",rowheight=rh if show else (no_cover_rowheight or 46))
+
+    def _wrap_tree_text(self,text,pixel_width,max_lines=5):
+        """Pixel-aware wrapping for Japanese/English text displayed in Treeview cells."""
+        text=str(text or "")
+        if not text:return text,1
+        try: font=tkfont.nametofont("TkDefaultFont")
+        except Exception: return text,1
+        width=max(80,int(pixel_width)-14)
+        lines=[]; current=""
+        for ch in text:
+            trial=current+ch
+            if current and font.measure(trial)>width:
+                lines.append(current)
+                current=ch
+                if len(lines)>=max_lines-1:
+                    current+=text[text.index(ch)+1:]
+                    break
+            else:
+                current=trial
+        if current:lines.append(current)
+        lines=lines[:max_lines]
+        return "\n".join(lines),max(1,len(lines))
 
     def refresh(self):
-        self.apply_cover_view()
+        self.apply_store_columns()
         self.apply_store_columns()
         self._cover_photos={}
         show_covers,cover_size,(cover_w,cover_h,_cw,_rh)=self.cover_view()
         for x in self.tree.get_children(): self.tree.delete(x)
         rows=self.db.rows(self.search.get().strip(),False,self.current_list_id,self.archived_view)
+        wrapped_titles={}
+        max_lines=2  # store price + observation timestamp already needs two lines
+        if not show_covers:
+            title_width=self.tree.column("title","width") or 590
+            for b,_offers in rows:
+                wrapped,nlines=self._wrap_tree_text(b["title"],title_width)
+                wrapped_titles[b["id"]]=wrapped
+                max_lines=max(max_lines,nlines)
+            # ttk.Treeview only supports one rowheight per widget, so size the current
+            # view to the tallest wrapped visible row rather than clipping individual rows.
+            self.apply_cover_view(min(104, 8+19*max_lines))
+        else:
+            self.apply_cover_view()
         for b,offers in rows:
             cash=[]
             for st,o in offers.items():
@@ -952,7 +1191,7 @@ class App(tk.Tk):
             if low is not None:
                 lowtxt += "\n" + ("Same" if len(enabled_matched)>=2 and len(cheapest)==len(enabled_matched)
                                    else " · ".join(cheapest))
-            vals=(b["title"],self.price_text(offers.get("BookLive")),
+            vals=(wrapped_titles.get(b["id"],b["title"]),self.price_text(offers.get("BookLive")),
                   self.price_text(offers.get("BOOK☆WALKER")),self.price_text(offers.get("DMM")),
                   lowtxt,len(enabled_matched))
             photo=""
@@ -1539,7 +1778,11 @@ class App(tk.Tk):
         ttk.Label(row3,text="Minimum delay between store requests (seconds):").pack(side="left")
         ttk.Entry(row3,textvariable=reqdelay,width=7).pack(side="left",padx=6)
         ttk.Separator(f).pack(fill="x",pady=(8,6))
-        ar=ttk.Frame(f); ar.pack(fill="x"); ttk.Label(ar,text="Appearance:").pack(side="left"); ttk.Combobox(ar,textvariable=appearance,values=("system","light","dark"),state="readonly",width=10).pack(side="left",padx=6)
+        ar=ttk.Frame(f); ar.pack(fill="x"); ttk.Label(ar,text="Appearance:").pack(side="left")
+        appearance_values=("system","light","dark") if UI_LANG!="ja" else ("システム","ライト","ダーク")
+        appearance_display=tk.StringVar(value=(appearance.get() if UI_LANG!="ja" else {"system":"システム","light":"ライト","dark":"ダーク"}.get(appearance.get(),"システム")))
+        appearance_box=ttk.Combobox(ar,textvariable=appearance_display,values=appearance_values,state="readonly",width=10)
+        appearance_box.pack(side="left",padx=6)
         rr=ttk.Frame(f); rr.pack(fill="x",pady=5); ttk.Label(rr,text="Recently Deleted retention (days):").pack(side="left"); ttk.Entry(rr,textvariable=retention,width=6).pack(side="left",padx=6)
         ttk.Label(f,text="Live matching is accuracy-first. A low-confidence result is left blank rather than attached to the wrong volume.",wraplength=470).pack(anchor="w",pady=8)
         def save():
@@ -1553,6 +1796,7 @@ class App(tk.Tk):
             self.db.set_setting("store_dmm_enabled","1" if store_dmm.get() else "0")
             self.db.set_setting("update_interval_hours",interval.get())
             self.db.set_setting("request_delay_seconds",reqdelay.get())
+            chosen_appearance=appearance_display.get(); appearance.set({"システム":"system","ライト":"light","ダーク":"dark"}.get(chosen_appearance,chosen_appearance))
             self.db.set_setting("appearance",appearance.get()); self.db.set_setting("trash_retention_days",retention.get())
             self.apply_theme()
             try:self.providers=live_providers(float(reqdelay.get()), self.log)
