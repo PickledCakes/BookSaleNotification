@@ -2284,7 +2284,7 @@ class App(tk.Tk):
                     existing={r['store']:r for r in worker_db.cx.execute("SELECT * FROM offers WHERE book_id=?",(book_id,))}
                     # Prefer a non-Amazon title as the search anchor. If this is an
                     # Amazon-only import, remove only its likely trailing publisher tag.
-                    source=next((existing[s] for s in SEARCH_STORES if s in existing),None)
+                    source=next((existing[s] for s in TITLE_SOURCE_PRIORITY if s!="Amazon" and s in existing),None)
                     if source is None:source=existing.get("Amazon") or next(iter(existing.values()),None)
                     qtitle=source['title'] if source else b['title']
                     if source and source['store']=="Amazon":qtitle=amazon_title_for_match(qtitle)
