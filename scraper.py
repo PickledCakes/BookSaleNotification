@@ -25,18 +25,28 @@ def key(s): return re.sub(r"[\W_]+","",nfkc(s).casefold(),flags=re.UNICODE)
 def money(s):
     if not s:return None
     text=nfkc(s)
-    # Prefer an explicitly yen-labelled amount before any bare number. Amazon
-    # sometimes places discount text such as "85% OFF" beside "￥396"; the old
-    # optional-currency regex incorrectly returned 85 as the book price.
     for pat in (
         r"[¥￥]\s*([0-9][0-9,]*)",
         r"([0-9][0-9,]*)\s*円",
     ):
         m=re.search(pat,text)
         if m:return int(m.group(1).replace(",",""))
-    # Some storefront fields contain only the numeric amount.
-    m=re.search(r"(?<![0-9])([0-9][0-9,]*)(?![0-9%％])",text)
+    # Only accept a bare number when the whole field is numeric. This prevents
+    # labels such as "85% OFF" from ever becoming a price.
+    m=re.fullmatch(r"\s*([0-9][0-9,]*)\s*",text)
     return int(m.group(1).replace(",","")) if m else None
+
+def yen_money(s):
+    """Strict yen parser for Amazon price labels; never accepts percentages."""
+    if not s:return None
+    text=nfkc(s)
+    for pat in (
+        r"[¥￥]\s*([0-9][0-9,]*)",
+        r"([0-9][0-9,]*)\s*円",
+    ):
+        m=re.search(pat,text)
+        if m:return int(m.group(1).replace(",",""))
+    return None
 
 def parse_volume(title):
     s=nfkc(title)
@@ -540,10 +550,9 @@ class Amazon(Provider):
         title=re.sub(r"\s*[:|｜-]\s*Amazon\.co\.jp.*$","",title,flags=re.I)
         title=re.sub(r"\s*[（(]\s*Kindle(?:版| Edition)\s*[）)]\s*$","",title,flags=re.I)
 
-        price=None; price_source=""
-        # Amazon's current Kindle page exposes the selected digital format in the
-        # format swatch rather than the generic buy box. Check that first so a
-        # paperback/other-format price on the same page can never win accidentally.
+        price=None; price_source=""; price_raw=""
+        # Amazon's visible Kindle swatch can include non-price text such as discount
+        # percentages or a Kindle Unlimited ¥0 value. Only accept explicit yen labels.
         price_selectors=(
             "#tmm-grid-swatch-KINDLE .slot-price .ebook-price-value",
             "#tmm-grid-swatch-KINDLE .slot-price",
@@ -556,33 +565,70 @@ class Amazon(Provider):
             ".a-price .a-offscreen",
         )
         for sel in price_selectors:
-            # Some Amazon containers contain an empty hidden price before the real
-            # value, so inspect every matching node instead of select_one().
             for node in soup.select(sel):
                 raw=(node.get("aria-label") or node.get_text(" ",strip=True) or "").strip()
-                value=money(raw)
+                value=yen_money(raw)
                 if value is not None:
-                    price=value; price_source=sel; break
+                    price=value; price_source=sel; price_raw=raw; break
             if price is not None:break
+
+        # Amazon also embeds the exact amount used for one-click acquisition. Tie it
+        # to THIS ASIN so bundle/paperback/other-format prices cannot be mistaken for
+        # the Kindle item. This is especially useful when the visible swatch says ¥0
+        # for Kindle Unlimited while the normal purchase price is still non-zero.
+        embedded_price=None
+        try:
+            decoded=html_lib.unescape(html)
+            pair_re=re.compile(
+                r'"value"\s*:\s*"([A-Z0-9]{10})"\s*,\s*"name"\s*:\s*"[^"]*\\.asin"\s*}'
+                r'\s*,\s*{\s*"value"\s*:\s*"([0-9][0-9,]*)"\s*,\s*"name"\s*:\s*"[^"]*\\.displayedPrice\\.value"',
+                re.I
+            )
+            embedded=[int(v.replace(",","")) for a,v in pair_re.findall(decoded) if a.upper()==asin]
+            positive=[v for v in embedded if v>0]
+            if positive: embedded_price=min(positive)
+            elif embedded: embedded_price=0
+        except Exception:
+            embedded_price=None
+
+        # Prefer the ASIN-bound purchase value when available. It is more specific
+        # than a generic DOM price label and avoids the observed 85%/¥0 false reads.
+        if embedded_price is not None:
+            price=embedded_price
+            price_source="embedded ASIN displayedPrice"
+            price_raw=str(embedded_price)
 
         listp=None
         for sel in ("#listPrice", ".basisPrice .a-offscreen", ".a-text-price .a-offscreen"):
             node=soup.select_one(sel)
             if node:
-                v=money(node.get_text(" ",strip=True))
+                v=yen_money(node.get_text(" ",strip=True))
                 if v is not None and (price is None or v>=price):
                     listp=v; break
 
         reward=None
-        # Keep Amazon points informational; the app's lowest-price calculation remains cash-only.
-        page_text=nfkc(soup.get_text(" ",strip=True))
-        for pat in (
-            r"(\d[\d,]*)\s*ポイント",
-            r"(\d[\d,]*)\s*pt(?:\s|$)",
-        ):
-            mm=re.search(pat,page_text,re.I)
-            if mm:
-                reward=int(mm.group(1).replace(",","")); break
+        # Prefer points from the selected Kindle format rather than unrelated bundle
+        # offers elsewhere on the page.
+        pn=soup.select_one("#tmm-grid-swatch-KINDLE .slot-buyingPoints")
+        if pn:
+            mm=re.search(r"(\d[\d,]*)\s*(?:pt|ポイント)",nfkc(pn.get_text(" ",strip=True)),re.I)
+            if mm:reward=int(mm.group(1).replace(",",""))
+        if reward is None:
+            page_text=nfkc(soup.get_text(" ",strip=True))
+            for pat in (
+                r"(\d[\d,]*)\s*ポイント",
+                r"(\d[\d,]*)\s*pt(?:\s|$)",
+            ):
+                mm=re.search(pat,page_text,re.I)
+                if mm:
+                    reward=int(mm.group(1).replace(",","")); break
+
+        # A zero-price read paired with non-zero purchase points is contradictory.
+        # If no ASIN-bound purchase price was found, leave it unknown instead of
+        # poisoning Lowest cash price with a false ¥0.
+        if price==0 and reward and embedded_price is None:
+            price=None
+            price_source="ambiguous Kindle ¥0 ignored"
 
         cover=""
         img=soup.select_one("#landingImage") or soup.select_one("#imgBlkFront")
@@ -598,7 +644,8 @@ class Amazon(Provider):
             if og:cover=(og.get("content") or "").strip()
 
         self.c.logger(f"[Amazon] Direct product values: cash={price}, points={reward}, ASIN={asin}" +
-                      (f", price_source={price_source}" if price_source else ""))
+                      (f", price_source={price_source}" if price_source else "") +
+                      (f", raw={price_raw!r}" if price_raw else ""))
         return Result(self.store,title,canonical,asin,price=price,list_price=listp,
                       reward_value=reward,cover_url=cover)
 
