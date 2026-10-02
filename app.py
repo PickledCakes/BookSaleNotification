@@ -23,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.8.6"
-APP_VERSION = "1.8.6"
+APP_NAME = "Book Sale Notification 1.8.7"
+APP_VERSION = "1.8.7"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -81,8 +81,8 @@ JA_UI={
         "更新内容を選択してください。既存の商品URLがある有効なストアだけにアクセスします。",
     "No matched product pages meet the selected update mode.":"選択した更新条件に該当する商品ページがありません。",
     "Edit store URLs":"ストアURLを編集",
-    "Manual URL editing is available for BookLive, BOOK☆WALKER and DMM. Amazon links can be added through Add from URL.":
-        "URLの手動編集はBookLive・BOOK☆WALKER・DMMに対応しています。Amazonは「URLから追加」から登録できます。",
+    "Edit the matched product URL for any store. Amazon URLs are automatically shortened to /dp/ASIN.":
+        "各ストアの一致済み商品URLを編集できます。Amazon URLは自動的に /dp/ASIN 形式へ短縮されます。",
     "Open":"開く","Save changes":"変更を保存","Invalid store URL":"無効なストアURL",
     "Add book from store URL":"ストアURLから書籍を追加",
     "Add from BookLive / BOOK☆WALKER / DMM / Amazon URL":"BookLive / BOOK☆WALKER / DMM / Amazon のURLから追加",
@@ -857,12 +857,22 @@ class DB:
     def set_url(self, book_id, store, url):
         if store not in MANUAL_URL_STORES or not valid_store_url(store,url):
             raise ValueError(f"Invalid or non-editable {store} product URL")
+        url=canonical_store_url(store,url)
+        store_id=""
+        if store=="Amazon":
+            m=re.search(r"/dp/([A-Z0-9]{10})(?:/|$)",url,re.I)
+            if m:store_id=m.group(1).upper()
         row=self.cx.execute("SELECT * FROM offers WHERE book_id=? AND store=?",(book_id,store)).fetchone()
         if row:
-            self.cx.execute("UPDATE offers SET url=?,locked=1 WHERE id=?",(url,row["id"]))
+            if store_id:
+                self.cx.execute("UPDATE offers SET url=?,store_id=?,locked=1 WHERE id=?",(url,store_id,row["id"]))
+            else:
+                self.cx.execute("UPDATE offers SET url=?,locked=1 WHERE id=?",(url,row["id"]))
         else:
-            self.cx.execute("""INSERT INTO offers(book_id,store,title,url,locked) 
-                               SELECT ?,?,title,?,1 FROM books WHERE id=?""",(book_id,store,url,book_id))
+            self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,locked)
+                               SELECT ?,?,?,title,?,1 FROM books WHERE id=?""",
+                            (book_id,store,store_id,url,book_id))
+        self.refresh_canonical_metadata(book_id,commit=False)
         self.cx.commit()
 
     def get_setting(self,key,default=""):
@@ -1724,19 +1734,19 @@ class App(tk.Tk):
 
         win=tk.Toplevel(self)
         win.title("Edit store URLs")
-        win.geometry("900x310")
+        win.geometry("900x350")
         win.resizable(False,False)
         win.transient(self)
         win.grab_set()
 
         outer=ttk.Frame(win,padding=14); outer.pack(fill="both",expand=True)
         ttk.Label(outer,text=book["title"],font=("Segoe UI",11,"bold"),wraplength=850).pack(anchor="w",pady=(0,12))
-        ttk.Label(outer,text="Manual URL editing is available for BookLive, BOOK☆WALKER and DMM. Amazon links can be added through Add from URL.",
+        ttk.Label(outer,text="Edit the matched product URL for any store. Amazon URLs are automatically shortened to /dp/ASIN.",
                   foreground="#555").pack(anchor="w",pady=(0,10))
 
         vars={}
         grid=ttk.Frame(outer); grid.pack(fill="x",expand=True)
-        for i,store in enumerate(SEARCH_STORES):
+        for i,store in enumerate(STORES):
             ttk.Label(grid,text=store,width=14).grid(row=i,column=0,sticky="w",pady=5)
             v=tk.StringVar(value=current.get(store,""))
             vars[store]=v
@@ -1763,7 +1773,8 @@ class App(tk.Tk):
                 store,url=invalid[0]
                 expected={"BookLive":"a BookLive product URL (booklive.jp)",
                           "BOOK☆WALKER":"a BOOK☆WALKER product URL (bookwalker.jp/de…)",
-                          "DMM":"a DMM Books product URL (book.dmm.com/product/…)"}[store]
+                          "DMM":"a DMM Books product URL (book.dmm.com/product/…)",
+                          "Amazon":"an Amazon.co.jp product URL containing /dp/ASIN"}[store]
                 messagebox.showerror("Invalid store URL",
                     f"The URL entered for {store} is not {expected}.\n\n{url}\n\nNo changes were saved.")
                 return
@@ -1778,6 +1789,7 @@ class App(tk.Tk):
                 self.auto_backup("remove_store_match")
             for store,v in vars.items():
                 newurl=v.get().strip()
+                if newurl:newurl=canonical_store_url(store,newurl)
                 oldurl=current.get(store,"")
                 if newurl != oldurl:
                     if newurl:
