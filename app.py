@@ -16,15 +16,15 @@ except ImportError:
     Image=ImageTk=None
 import csv, shutil, threading, time
 from datetime import datetime
-from scraper import providers as live_providers
+from scraper import providers as live_providers, parse_volume as live_parse_volume, edition_compatible as live_edition_compatible
 
 try:
     from bs4 import BeautifulSoup
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.7.2"
-APP_VERSION = "1.7.2"
+APP_NAME = "Book Sale Notification 1.8.0"
+APP_VERSION = "1.8.0"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -36,8 +36,10 @@ def app_data_dir():
     return Path(__file__).resolve().parent
 DATA_DIR=app_data_dir()
 DB_PATH=DATA_DIR/"books.db"
-STORES = ("BookLive", "BOOK☆WALKER", "DMM")
-STORE_KEYS = {"BookLive":"booklive", "BOOK☆WALKER":"bookwalker", "DMM":"dmm"}
+STORES = ("BookLive", "BOOK☆WALKER", "DMM", "Amazon")
+SEARCH_STORES = ("BookLive", "BOOK☆WALKER", "DMM")
+MANUAL_URL_STORES = SEARCH_STORES
+STORE_KEYS = {"BookLive":"booklive", "BOOK☆WALKER":"bookwalker", "DMM":"dmm", "Amazon":"amazon"}
 
 UI_LANG="en"
 JA_UI={
@@ -262,6 +264,53 @@ def title_similarity(a, b):
     if a == b: return 1.0
     return SequenceMatcher(None, a, b).ratio()
 
+AMAZON_PUBLISHER_HINTS=(
+    "コミック","コミックス","COMIC","COMICS","文庫","マガジン","MAGAZINE",
+    "DIGITAL","デジタル版","シリーズ","レーベル","電撃","角川","KADOKAWA",
+    "チャンピオン","モーニング","デザート","フラワー","ガンガン","ビーム",
+    "ヤング","アクション","シリウス","ゼノン","マーガレット","ドラゴン",
+    "アルファポリス","ガルド","メテオ","トレイル","NOIPA","BLIC","MANGA",
+    "HJ","MF","GA","FLOS","アース・スター"
+)
+
+def amazon_title_for_match(title):
+    """Remove only a likely trailing Amazon imprint/publisher tag.
+
+    Parentheses are never removed generically: volume numbers often live in them.
+    """
+    s=unicodedata.normalize("NFKC",str(title or "")).strip()
+    m=re.search(r"\s*[（(]([^()（）]{1,70})[）)]\s*$",s)
+    if not m:return s
+    tag=m.group(1).strip()
+    # Never strip a terminal volume token or known edition/type marker.
+    if re.fullmatch(r"\s*(?:第\s*)?\d+(?:\.\d+)?\s*(?:巻)?\s*",tag,re.I):
+        return s
+    if any(marker in tag for marker in ("特装版","合本版","単話版","無料版","セット版","分冊版","完全版","愛蔵版")):
+        return s
+    prefix=s[:m.start()].rstrip()
+    _base,vol=live_parse_volume(prefix)
+    tag_upper=tag.upper()
+    publisherish=any(h.upper() in tag_upper for h in AMAZON_PUBLISHER_HINTS)
+    # Unknown parenthetical text is stripped only when a volume is already clearly
+    # present before it, which is much safer than removing arbitrary parentheses.
+    return prefix if publisherish or vol is not None else s
+
+def cross_store_title_similarity(title_a,stores_a,title_b,stores_b):
+    stores_a=set(stores_a or ()); stores_b=set(stores_b or ())
+    amazon_a="Amazon" in stores_a; amazon_b="Amazon" in stores_b
+    if amazon_a ^ amazon_b:
+        aa=amazon_title_for_match(title_a) if amazon_a else title_a
+        bb=amazon_title_for_match(title_b) if amazon_b else title_b
+        if not live_edition_compatible(aa,bb):
+            return 0.0
+        _ab,av=live_parse_volume(aa); _bb,bv=live_parse_volume(bb)
+        # Conservative Amazon reconciliation: if either side has a volume hint,
+        # both sides must have the same one.
+        if (av is None) != (bv is None): return 0.0
+        if av is not None and str(av)!=str(bv): return 0.0
+        return title_similarity(aa,bb)
+    return title_similarity(title_a,title_b)
+
 def canonical_url(url):
     if not url: return ""
     return url.split("?")[0].split("#")[0]
@@ -282,40 +331,76 @@ def valid_store_url(store, url):
         return (host=="bookwalker.jp" or host.endswith(".bookwalker.jp")) and bool(re.search(r"/de[0-9A-Za-z-]+/?",path,re.I))
     if store=="DMM":
         return (host=="book.dmm.com" or host.endswith(".book.dmm.com")) and "/product/" in path
+    if store=="Amazon":
+        return (host=="amazon.co.jp" or host.endswith(".amazon.co.jp")) and bool(re.search(r"/dp/[A-Z0-9]{10}(?:/|$)",path,re.I))
     return False
 
 def parse_amazon(soup):
     out = []
+
+    # Amazon.co.jp wishlist HTML.
     for item in soup.select(".g-item-sortable"):
-        text = item.get_text(" ", strip=True)
-        if "Kindle" not in text and "Digital" not in text:
+        text=item.get_text(" ",strip=True)
+        # Keep phase 1 Kindle/digital-only. A normal Amazon wishlist can also contain
+        # physical books and unrelated products.
+        if "Kindle" not in text and "Digital" not in text and "電子書籍" not in text:
             continue
-        links = [a for a in item.find_all("a", href=True)
-                 if "/dp/" in a["href"] and a.get_text(" ", strip=True)
-                 and a.get_text(" ", strip=True).lower() not in {"see all buying options"}]
-        if not links: continue
-        # Wishlist title links normally use the dp_it ref. Prefer them over action links.
-        preferred = [a for a in links if "dp_it" in a.get("href","")]
-        a = max(preferred or links, key=lambda x: len(x.get_text(" ", strip=True)))
-        title = a.get_text(" ", strip=True)
-        title = re.sub(r'\s*\(Kindle Edition\)\s*$', '', title, flags=re.I)
-        # Prefer explicit price spans when present.
-        p = None
-        for sel in (".a-price .a-offscreen", ".itemPriceDrop", ".a-price-whole"):
-            node = item.select_one(sel)
+        links=[a for a in item.find_all("a",href=True)
+               if re.search(r"(?:amazon\.co\.jp)?/dp/[A-Z0-9]{10}",a["href"],re.I)
+               and a.get_text(" ",strip=True)
+               and a.get_text(" ",strip=True).lower() not in {"see all buying options"}]
+        if not links:continue
+        preferred=[a for a in links if "dp_it" in a.get("href","")]
+        a=max(preferred or links,key=lambda x:len(x.get_text(" ",strip=True)))
+        title=a.get_text(" ",strip=True)
+        title=re.sub(r"\s*[（(]\s*Kindle(?:版| Edition)\s*[）)]\s*$","",title,flags=re.I)
+        href=a.get("href","")
+        mid=re.search(r"/dp/([A-Z0-9]{10})",href,re.I)
+        if not mid:continue
+        asin=mid.group(1).upper()
+        url=f"https://www.amazon.co.jp/dp/{asin}"
+
+        price=None
+        for sel in (".a-price .a-offscreen",".itemPriceDrop",".a-price-whole"):
+            node=item.select_one(sel)
             if node:
-                p = yen(node.get_text(" ", strip=True))
-                if p is not None: break
-        if p is None:
-            m = re.search(r'[¥￥]\s*([0-9][0-9,]*)', text)
-            p = int(m.group(1).replace(",","")) if m else None
-        author = ""
-        m = re.search(r'\bby\s+(.+?)\s+\(Kindle Edition\)', text, re.I)
-        if m: author = m.group(1).strip()
-        url = canonical_url(a["href"])
-        mid = re.search(r'/dp/([A-Z0-9]{10})', url, re.I)
-        out.append(Offer("Amazon", title, url, p, author=author,
-                         store_id=mid.group(1).upper() if mid else ""))
+                price=yen(node.get_text(" ",strip=True))
+                if price is not None:break
+        if price is None:
+            mm=re.search(r"[¥￥]\s*([0-9][0-9,]*)",text)
+            price=int(mm.group(1).replace(",","")) if mm else None
+        author=""
+        ma=re.search(r"\bby\s+(.+?)\s+[（(]Kindle Edition[）)]",text,re.I)
+        if ma:author=ma.group(1).strip()
+        out.append(Offer("Amazon",title,url,price,author=author,store_id=asin,flags="amazon_html"))
+
+    # 電子書籍の司書さん (k.xpg.jp) saved list HTML.
+    # The visible top price is often cash minus points, e.g. ￥327 with
+    # "(￥330-3pt)". Store cash=330 and reward=3 so Lowest remains cash-only.
+    for li in soup.select("ol.result li"):
+        a=li.select_one('h4 a[href*="amazon.co.jp/dp/"]')
+        if not a:continue
+        href=a.get("href","")
+        mid=re.search(r"/dp/([A-Z0-9]{10})",href,re.I)
+        if not mid:continue
+        asin=mid.group(1).upper()
+        title=a.get_text(" ",strip=True)
+        price_node=li.select_one("li.price")
+        ptext=price_node.get_text(" ",strip=True) if price_node else ""
+        cash=reward=None
+        pm=re.search(r"[（(]\s*[¥￥]\s*([0-9][0-9,]*)\s*-\s*([0-9][0-9,]*)\s*pt\s*[）)]",ptext,re.I)
+        if pm:
+            cash=int(pm.group(1).replace(",",""))
+            reward=int(pm.group(2).replace(",",""))
+        if cash is None:
+            pm=re.search(r"[¥￥]\s*([0-9][0-9,]*)",ptext)
+            if pm:cash=int(pm.group(1).replace(",",""))
+        cover=""
+        img=li.select_one("img[data-img]") or li.select_one('img[src*="media-amazon.com"]')
+        if img:
+            cover=(img.get("data-img") or img.get("src") or "").strip()
+        out.append(Offer("Amazon",title,f"https://www.amazon.co.jp/dp/{asin}",cash,
+                         reward_value=reward,cover_url=cover,store_id=asin,flags="xpg_html"))
     return dedupe(out)
 
 def parse_booklive(soup):
@@ -409,13 +494,15 @@ def dedupe(items):
 def detect_store(soup, filename=""):
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
     hay = (title + " " + filename).lower()
-    if "amazon" in hay or soup.select_one(".g-item-sortable"): return "Amazon (disabled in 1.1)"
+    if ("電子書籍の司書さん" in title and soup.select_one('a[href*="amazon.co.jp/dp/"]')) or soup.select_one("ol.result li h4 a[href*='amazon.co.jp/dp/']"):
+        return "Amazon"
+    if "amazon" in hay or soup.select_one(".g-item-sortable"): return "Amazon"
     if "bookwalker" in hay or soup.select_one(".bw_checklist_unit"): return "BOOK☆WALKER"
     if "dmm" in hay or soup.select_one("table.fn-bookmarkList"): return "DMM"
     if "ブックライブ" in hay or "booklive" in hay or soup.select_one("ul.save_list"): return "BookLive"
     return None
 
-PARSERS = {"BookLive":parse_booklive, "BOOK☆WALKER":parse_bookwalker, "DMM":parse_dmm}
+PARSERS = {"BookLive":parse_booklive, "BOOK☆WALKER":parse_bookwalker, "DMM":parse_dmm, "Amazon":parse_amazon}
 
 class DB:
     def __init__(self, path=DB_PATH):
