@@ -310,6 +310,8 @@ JA_UI={
     "Test multiple sale notifications":"複数セール通知をテスト",
     "Simulates a 50% sale using the selected rule. No book data or price history is changed.":
         "選択中の通知ルールで50%オフのセールを模擬します。書籍データや価格履歴は変更されません。",
+    "Simulates a 50% sale using the selected rule. The multiple test simulates three books going on sale at once. No book data or price history is changed.":
+        "選択中の通知ルールで50%オフのセールを模擬します。複数テストでは3冊が同時にセールになった状況を再現します。書籍データや価格履歴は変更されません。",
     "Simulates three books going on sale at once to test grouped notifications.":
         "3冊が同時にセールになった状況を模擬し、まとめ通知をテストします。",
     "Books on sale":"冊の書籍がセール中",
@@ -2936,7 +2938,10 @@ class App(tk.Tk):
             if event["reason"]=="historical_low":
                 msg=f"{title}\n{store}：¥{price:,}（記録上の最安値）"
             elif discount is not None:
-                msg=f"{title}\n{store}：¥{price:,}（{discount:.0f}%オフ）"
+                if test and event.get("reason")=="good_deal" and event.get("test_threshold") is not None:
+                    msg=f"{title}\n{store}：¥{price:,}（{discount:.0f}%オフ、設定しきい値 {event['test_threshold']:g}%）"
+                else:
+                    msg=f"{title}\n{store}：¥{price:,}（{discount:.0f}%オフ）"
             else:
                 msg=f"{title}\n{store}：¥{price:,}"
         else:
@@ -2944,7 +2949,10 @@ class App(tk.Tk):
             if event["reason"]=="historical_low":
                 msg=f"{title}\n{store}: ¥{price:,} — new recorded low"
             elif discount is not None and ref is not None:
-                msg=f"{title}\n{store}: ¥{price:,} ({discount:.0f}% off, was ¥{ref:,})"
+                if test and event.get("reason")=="good_deal" and event.get("test_threshold") is not None:
+                    msg=f"{title}\n{store}: ¥{price:,} ({discount:.0f}% off, was ¥{ref:,}) — threshold {event['test_threshold']:g}%"
+                else:
+                    msg=f"{title}\n{store}: ¥{price:,} ({discount:.0f}% off, was ¥{ref:,})"
             else:
                 msg=f"{title}\n{store}: ¥{price:,}"
         self._desktop_notification(heading,msg)
