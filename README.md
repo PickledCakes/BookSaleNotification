@@ -33,7 +33,7 @@ Book Sale Notification keeps one combined watchlist, matches the same volume acr
 - Light / dark appearance.
 - GitHub-based application updates for packaged Windows builds.
 - Update checks can run automatically on startup, but installation is always manual and can be disabled in Settings.
-- Settings can opt into the GitHub pre-release update channel for test builds; stable users stay on normal releases.
+- Settings can opt into the nightly/pre-release update channel for test builds; stable users stay on normal releases.
 
 Matching is intentionally conservative. It is better for the app to leave a store blank than attach the wrong volume or edition.
 
@@ -129,6 +129,7 @@ The **Lowest cash price** column compares cash prices only.
 
 Rewards are shown separately and do not reduce the cash comparison:
 - Signed-out BOOK☆WALKER pages may advertise a **新規限定** first-purchase bonus. The app ignores that promotional amount rather than treating it as the normal coin reward.
+- **1.9 beta:** Settings includes BOOK☆WALKER account connection through an Edge WebView2 window. Connected sessions can provide normal coin values; otherwise coins stay hidden while cash prices still update.
 
 - DMM points
 - BOOK☆WALKER coins
