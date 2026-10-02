@@ -86,12 +86,12 @@ def score(wanted,candidate,wanted_author="",candidate_author=""):
 class Client:
     def __init__(self,delay=1.25,timeout=20,logger=None):
         self.s=requests.Session(); self.s.headers.update({"User-Agent":UA,"Accept-Language":"ja-JP,ja;q=0.9,en;q=0.6"})
-        self.delay=delay; self.timeout=timeout; self.last=0; self.logger=logger or (lambda m:None)
+        self.delay=delay; self.timeout=timeout; self.last=0; self.last_url=""; self.logger=logger or (lambda m:None)
     def get(self,url):
         wait=self.delay-(time.monotonic()-self.last)
         if wait>0:time.sleep(wait)
         self.logger("GET "+url)
-        r=self.s.get(url,timeout=self.timeout,allow_redirects=True); self.last=time.monotonic()
+        r=self.s.get(url,timeout=self.timeout,allow_redirects=True); self.last=time.monotonic(); self.last_url=r.url
         self.logger(f"HTTP {r.status_code} • {len(r.content):,} bytes • {r.url}")
         r.raise_for_status()
         # These Japanese storefronts are UTF-8. requests' apparent_encoding can
@@ -374,8 +374,27 @@ class BookWalker(Provider):
                       reward_value=reward,tax_ex_price=taxex,cover_url=cover)
 
 
+class DMMRegionError(RuntimeError):
+    """DMM Books redirected away from book.dmm.com, typically due to region access."""
+    pass
+
+
 class DMM(Provider):
     store="DMM"; base="https://book.dmm.com"
+
+    def _get(self,url):
+        html=self._get(url)
+        final=urlparse(self.c.last_url or url)
+        host=(final.hostname or "").lower()
+        # Outside Japan DMM Books commonly redirects search/product requests to
+        # accounts.dmm.com/service/login/password instead of returning book content.
+        if host=="accounts.dmm.com" and final.path.startswith("/service/login/"):
+            self.c.logger("[DMM] Access redirected to DMM login/access page — Japanese IP required")
+            raise DMMRegionError(
+                "DMM Books is not accessible from the current network. "
+                "Connect through a Japanese IP address/VPN and try again."
+            )
+        return html
 
     def _product_url(self, href):
         clean=href.split("?")[0]
@@ -440,7 +459,7 @@ class DMM(Provider):
         # the exact numbered title exists.
         for q in dict.fromkeys([stem,title]):
             if not q: continue
-            soup=BeautifulSoup(self.c.get(f"{self.base}/search/?searchstr={quote(q)}"),"html.parser")
+            soup=BeautifulSoup(self._get(f"{self.base}/search/?searchstr={quote(q)}"),"html.parser")
             raw={}
             for a in soup.find_all("a",href=True):
                 pu=self._product_url(a["href"])
@@ -462,7 +481,7 @@ class DMM(Provider):
                 if sim < .60: continue
                 try:
                     self.c.logger(f"[{self.store}] Inspecting series candidate {idx}/{min(8,len(ranked))}: {r.url}")
-                    html=self.c.get(r.url)
+                    html=self._get(r.url)
                     sm=re.search(r"/product/(\d+)/",r.url)
                     series_id=sm.group(1) if sm else ""
                     siblings=self._series_candidates(html,series_id)
