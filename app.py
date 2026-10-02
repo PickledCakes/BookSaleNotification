@@ -24,8 +24,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.9.0"
-APP_VERSION = "1.9.0"
+APP_NAME = "Book Sale Notification 1.9.1-beta.1"
+APP_VERSION = "1.9.1-beta.1"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -307,8 +307,13 @@ JA_UI={
     "Notification rule":"通知ルール","Any sale":"セールなら通知","Lowest recorded price":"記録上の最安値",
     "Good deal":"お得な価格","Good-deal threshold (> %):":"お得判定の割引率 (> %):",
     "Test sale notification":"セール通知をテスト",
+    "Test multiple sale notifications":"複数セール通知をテスト",
     "Simulates a 50% sale using the selected rule. No book data or price history is changed.":
         "選択中の通知ルールで50%オフのセールを模擬します。書籍データや価格履歴は変更されません。",
+    "Simulates three books going on sale at once to test grouped notifications.":
+        "3冊が同時にセールになった状況を模擬し、まとめ通知をテストします。",
+    "Books on sale":"冊の書籍がセール中",
+    "qualifying books have new sale prices.":"冊の書籍で通知条件に合う新しいセール価格を検出しました。",
     "Show direct DMM points / BOOK☆WALKER coins / Amazon points in store price columns":
         "DMMポイント / BOOK☆WALKERコイン / Amazonポイントを価格欄に表示",
     "BOOK☆WALKER overseas tax mode (show stored tax-exclusive price when known)":
@@ -2461,27 +2466,25 @@ class App(tk.Tk):
         messagebox.showinfo(title,message)
         return False
 
-    def _test_sale_notification(self,rule=None,threshold_text=None):
+    def _test_sale_notification(self,rule=None,threshold_text=None,multiple=False):
         rule=rule or self.db.get_setting("notification_rule","any_sale")
         try: threshold=float(threshold_text if threshold_text is not None else self.db.get_setting("deal_threshold","20"))
         except Exception: threshold=20.0
-        if UI_LANG=="ja":
-            if rule=="historical_low":
-                msg="テスト書籍が記録上の最安値になりました：BookLive で ¥396"
-            elif rule=="good_deal":
-                msg=f"テスト書籍が50%オフ：¥396（通常 ¥792）— 設定しきい値 {threshold:g}%"
-            else:
-                msg="テスト書籍がセール中：BookLive で ¥792 → ¥396（50%オフ）"
-            title="セール通知テスト"
-        else:
-            if rule=="historical_low":
-                msg="Test Book reached a new recorded low: ¥396 at BookLive"
-            elif rule=="good_deal":
-                msg=f"Test Book is 50% off: ¥396 (was ¥792) — threshold {threshold:g}%"
-            else:
-                msg="Test Book is on sale: ¥792 → ¥396 at BookLive (50% off)"
-            title="Sale notification test"
-        self._desktop_notification(title,msg)
+        reason={"historical_low":"historical_low","good_deal":"good_deal"}.get(rule,"any_sale")
+        count=3 if multiple else 1
+        events=[]
+        samples=[
+            (900001,"Test Book 1","BookLive",396,792),
+            (900002,"Test Book 2","BOOK☆WALKER",330,660),
+            (900003,"Test Book 3","DMM",440,880),
+        ]
+        for book_id,title,store,price,reference in samples[:count]:
+            events.append({
+                "book_id":book_id,"title":title,"store":store,"price":price,
+                "reference":reference,"discount":50.0,"prior_low":reference,
+                "reason":reason,"test_threshold":threshold,
+            })
+        self._dispatch_sale_events(events,test=True)
 
     def _notify_bookwalker_expired(self):
         msg="Your BOOK☆WALKER session has expired. Sign in again to continue receiving your account-specific coin amounts."
@@ -2632,11 +2635,13 @@ class App(tk.Tk):
         row=ttk.Frame(f); row.pack(fill="x",pady=6)
         ttk.Label(row,text="Good-deal threshold (> %):").pack(side="left")
         ttk.Entry(row,textvariable=threshold,width=8).pack(side="left",padx=6)
-        test_row=ttk.Frame(f); test_row.pack(fill="x",pady=(0,6))
+        test_row=ttk.Frame(f); test_row.pack(fill="x",pady=(0,2))
         ttk.Button(test_row,text="Test sale notification",
                    command=lambda:self._test_sale_notification(notify.get(),threshold.get())).pack(side="left")
-        ttk.Label(test_row,text="Simulates a 50% sale using the selected rule. No book data or price history is changed.",
-                  wraplength=400).pack(side="left",padx=(10,0))
+        ttk.Button(test_row,text="Test multiple sale notifications",
+                   command=lambda:self._test_sale_notification(notify.get(),threshold.get(),True)).pack(side="left",padx=(6,0))
+        ttk.Label(f,text="Simulates a 50% sale using the selected rule. The multiple test simulates three books going on sale at once. No book data or price history is changed.",
+                  wraplength=520).pack(anchor="w",pady=(0,6))
         def apply_price_view():
             self.db.set_setting("include_direct_rewards","1" if rewards.get() else "0")
             self.db.set_setting("bw_overseas_tax","1" if bw_tax.get() else "0")
@@ -2894,27 +2899,55 @@ class App(tk.Tk):
                 "reference":reference,"discount":discount,"prior_low":prior_low,
                 "reason":reason}
 
-    def _dispatch_sale_events(self,events):
-        for event in events or []:
-            title=event["title"]; store=event["store"]; price=event["price"]
-            ref=event.get("reference"); discount=event.get("discount")
+    def _dispatch_sale_events(self,events,test=False):
+        events=list(events or [])
+        if not events:return
+
+        # A refresh can produce one event per store offer. Group first by book so
+        # a title on sale at multiple stores still counts as one book notification.
+        books={}
+        for event in events:
+            key=event.get("book_id")
+            if key is None:key=("title",event.get("title",""))
+            books.setdefault(key,[]).append(event)
+
+        if len(books)>1:
+            count=len(books)
             if UI_LANG=="ja":
-                heading="セールを検出"
-                if event["reason"]=="historical_low":
-                    msg=f"{title}\n{store}：¥{price:,}（記録上の最安値）"
-                elif discount is not None:
-                    msg=f"{title}\n{store}：¥{price:,}（{discount:.0f}%オフ）"
-                else:
-                    msg=f"{title}\n{store}：¥{price:,}"
+                heading=f"{count}冊の書籍がセール中"
+                msg=f"{count}冊の書籍で通知条件に合う新しいセール価格を検出しました。"
             else:
-                heading="Book sale found"
-                if event["reason"]=="historical_low":
-                    msg=f"{title}\n{store}: ¥{price:,} — new recorded low"
-                elif discount is not None and ref is not None:
-                    msg=f"{title}\n{store}: ¥{price:,} ({discount:.0f}% off, was ¥{ref:,})"
-                else:
-                    msg=f"{title}\n{store}: ¥{price:,}"
+                heading=f"{count} books on sale"
+                msg=f"{count} qualifying books have new sale prices."
+            if test:
+                msg+=("\nまとめ通知のテストです。" if UI_LANG=="ja" else "\nThis is a grouped notification test.")
             self._desktop_notification(heading,msg)
+            self.log(f"[Notification] Grouped {len(events)} sale event(s) across {count} book(s)")
+            return
+
+        # One qualifying book keeps the detailed notification. If more than one
+        # store triggered for that book, use the first/best event for now; phase 3
+        # will expose all matching store sale entries in the notification center.
+        event=next(iter(books.values()))[0]
+        title=event["title"]; store=event["store"]; price=event["price"]
+        ref=event.get("reference"); discount=event.get("discount")
+        if UI_LANG=="ja":
+            heading="セールを検出"
+            if event["reason"]=="historical_low":
+                msg=f"{title}\n{store}：¥{price:,}（記録上の最安値）"
+            elif discount is not None:
+                msg=f"{title}\n{store}：¥{price:,}（{discount:.0f}%オフ）"
+            else:
+                msg=f"{title}\n{store}：¥{price:,}"
+        else:
+            heading="Book sale found"
+            if event["reason"]=="historical_low":
+                msg=f"{title}\n{store}: ¥{price:,} — new recorded low"
+            elif discount is not None and ref is not None:
+                msg=f"{title}\n{store}: ¥{price:,} ({discount:.0f}% off, was ¥{ref:,})"
+            else:
+                msg=f"{title}\n{store}: ¥{price:,}"
+        self._desktop_notification(heading,msg)
 
     def update_prices(self):
         selected=set(self.selected_ids())
