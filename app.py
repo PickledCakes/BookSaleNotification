@@ -1233,15 +1233,19 @@ class App(tk.Tk):
             )
             icon=pystray.Icon("BookSaleNotification",image,APP_NAME,menu)
             ready=threading.Event()
+            started={"ok":False}
             def setup(i):
                 i.visible=True
+                started["ok"]=True
                 ready.set()
             def runner():
                 try: icon.run(setup=setup)
-                except Exception: ready.set()
+                except Exception as e:
+                    self.log(f"[Tray] System tray backend failed: {type(e).__name__}: {e}")
+                    ready.set()
             thread=threading.Thread(target=runner,daemon=True)
             thread.start()
-            if not ready.wait(2.0):
+            if not ready.wait(2.0) or not started["ok"]:
                 try: icon.stop()
                 except Exception: pass
                 return False
@@ -2537,8 +2541,18 @@ class App(tk.Tk):
         threading.Thread(target=wait_for_login,daemon=True).start()
 
     def settings_dialog(self):
-        w=tk.Toplevel(self); w.title("Settings"); w.geometry("640x940"); w.resizable(False,False)
-        f=ttk.Frame(w,padding=16); f.pack(fill="both",expand=True)
+        w=tk.Toplevel(self); w.title("Settings"); w.geometry("660x800"); w.minsize(620,620); w.resizable(True,True)
+        savebar=ttk.Frame(w,padding=(16,4,16,12)); savebar.pack(fill="x",side="bottom")
+        body=ttk.Frame(w); body.pack(fill="both",expand=True)
+        canvas_bg="#121212" if self.db.get_setting("appearance","system")=="dark" else "#f0f0f0"
+        canvas=tk.Canvas(body,highlightthickness=0,bg=canvas_bg)
+        scroll=ttk.Scrollbar(body,orient="vertical",command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right",fill="y"); canvas.pack(side="left",fill="both",expand=True)
+        f=ttk.Frame(canvas,padding=16)
+        settings_window=canvas.create_window((0,0),window=f,anchor="nw")
+        f.bind("<Configure>",lambda e:canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",lambda e:canvas.itemconfigure(settings_window,width=e.width))
         notify=tk.StringVar(value=self.db.get_setting("notification_rule","any_sale"))
         threshold=tk.StringVar(value=self.db.get_setting("deal_threshold","20"))
         rewards=tk.BooleanVar(value=self.db.get_setting("include_direct_rewards","1")=="1")
@@ -2659,7 +2673,6 @@ class App(tk.Tk):
             try:self.providers=live_providers(float(reqdelay.get()), self.log,load_bookwalker_cookies())
             except:pass
             w.destroy()
-        savebar=ttk.Frame(w,padding=(16,4,16,12)); savebar.pack(fill="x",side="bottom")
         footer_dark=(self.db.get_setting("appearance","system")=="dark")
         btn_bg="#2a2a2a" if footer_dark else "#f4f4f4"
         btn_fg="#ffffff" if footer_dark else "#111111"
