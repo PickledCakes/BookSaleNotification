@@ -1,5 +1,6 @@
 from __future__ import annotations
 import re, time, unicodedata, json
+import html as html_lib
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from urllib.parse import quote, urljoin, urlparse
