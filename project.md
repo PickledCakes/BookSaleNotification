@@ -401,6 +401,7 @@ Before publishing any stable release:
 
 - `pywebview` for BOOK☆WALKER login through Edge WebView2
 - `pystray` for system tray support
+- `matplotlib` for the interactive Price History graph
 
 The PyInstaller spec includes the needed pywebview/pythonnet and pystray modules.
 
@@ -525,3 +526,23 @@ For 1.9:
 - Adds a top-level **Sales** button with unread book count.
 - Sales window groups events by book newest-first, supports Mark selected as read / Mark all as read, shows active vs ended sales, and presents one button per currently-on-sale store with cheapest store called out.
 - Grouped desktop notifications now include up to three book titles plus a remaining-book count and direct users to the Sales window for details.
+
+### beta.3 — Main sale viewer + graphical history
+
+- Removes the separate Sales window/button from the primary workflow; current sales are reviewed through the main table and **Show only books on sale**.
+- Grouped desktop sale alerts now direct users to the main sale filter instead of the removed Sales window.
+- Adds a **Latest sale** main-table column sourced from the newest active sale detection time for each book; first click sorts newest-first.
+- Renames CHEAPEST presentation to **LOWEST** and supports independent/combined labels: `SALE`, `★ LOWEST`, and `SALE • ★ LOWEST`.
+- Main-table widths are persisted in settings. Store/price columns auto-expand to fit the widest visible line and are never automatically shrunk below the saved user width.
+- Adds Windows single-instance enforcement. A second launch signals the existing process to restore/focus itself, including when hidden in the tray.
+- Settings, Recently Deleted, Backup/Share, Add from URL, Update Prices, Edit store URLs, Match Results, and per-book Price History windows use single-window behavior.
+- Replaces the old Price History observation list as the default view with an embedded Matplotlib step chart.
+- History ranges: 1 Month / 3 Months / 6 Months / 1 Year / All.
+- Only globally enabled stores appear anywhere in Price History; disabled-store DB/history data is retained unchanged and reappears when the store is re-enabled.
+- Enabled stores have temporary per-window graph visibility checkboxes that do not alter global Settings.
+- Consecutive identical price/list-price observations are collapsed for graph display, while all original database observations remain stored.
+- Hovering a change point shows store, exact date/time, exact yen price, previous price when known, and discount percentage when meaningful.
+- Y-axis prefers ¥100 ticks for normal ebook ranges and automatically increases the interval for unusually large ranges.
+- Optional regular/list-price step lines can be shown.
+- Graph summary shows Current, Lowest, Highest, Average, and Last changed per enabled store.
+- Data tab defaults to **Show price changes only** and can reveal every stored observation for debugging/auditing.
