@@ -7,7 +7,7 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **DMM Books**
 - **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.8.2**
+> Current version: **1.8.3**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
@@ -25,6 +25,7 @@ Book Sale Notification keeps one combined watchlist, matches the same volume acr
 - Backup, restore, and share lists.
 - Sync purchased books from Calibre CSV identifiers.
 - English / Japanese UI toggle.
+- Remembers the main window size, position, maximized state, and table/activity split.
 - Light / dark appearance.
 - GitHub-based application updates for packaged Windows builds.
 
@@ -180,6 +181,7 @@ Calibre sync does not use fuzzy title matching.
 - Storefront HTML and page layouts can change and may temporarily break parsing.
 - Some pages may return 403 or other request errors even when they open normally in a browser.
 - Matching is heuristic and intentionally conservative.
+- The main window has a minimum size so the comparison columns cannot be squeezed behind the Activity panel.
 - Background unattended sale notifications are not yet implemented.
 - The Windows build is not code-signed yet.
 
