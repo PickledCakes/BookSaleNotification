@@ -1,5 +1,6 @@
 from __future__ import annotations
 import sys, os, subprocess, tempfile, hashlib, urllib.request, shutil
+import requests
 import json, os, re, sqlite3, sys, unicodedata, webbrowser
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -11,9 +12,9 @@ import urllib.request
 from io import BytesIO
 from tkinter import ttk, filedialog, messagebox, simpledialog
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageDraw
 except ImportError:
-    Image=ImageTk=None
+    Image=ImageTk=ImageDraw=None
 import csv, shutil, threading, time
 from datetime import datetime
 from scraper import providers as live_providers, parse_volume as live_parse_volume, edition_compatible as live_edition_compatible, DMMRegionError
@@ -23,8 +24,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.9.0-beta.3"
-APP_VERSION = "1.9.0-beta.3"
+APP_NAME = "Book Sale Notification 1.9.0-beta.4"
+APP_VERSION = "1.9.0-beta.4"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -85,6 +86,58 @@ def load_bookwalker_cookies():
                 if isinstance(x,dict) and "bookwalker.jp" in str(x.get("domain") or "").lower()]
     except Exception:
         return []
+
+def check_bookwalker_session():
+    """Return (status, detail) where status is signed_in/signed_out/unavailable."""
+    records=load_bookwalker_cookies()
+    if not records:
+        return "signed_out","No saved BOOK☆WALKER session."
+    s=requests.Session()
+    s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36",
+                      "Accept-Language":"ja-JP,ja;q=0.9,en;q=0.6"})
+    for item in records:
+        try:
+            s.cookies.set(str(item.get("name") or ""),str(item.get("value") or ""),
+                          domain=str(item.get("domain") or ".bookwalker.jp"),
+                          path=str(item.get("path") or "/"))
+        except Exception:
+            pass
+    try:
+        r=s.get("https://bookwalker.jp/",timeout=15,allow_redirects=True)
+        r.raise_for_status()
+        if re.search(r"BW_IS_LOGIN\s*=\s*true",r.text,re.I):
+            refreshed=[]
+            for cookie in s.cookies:
+                if "bookwalker.jp" in (cookie.domain or "").lower():
+                    refreshed.append({"name":cookie.name,"value":cookie.value,
+                                      "domain":cookie.domain or ".bookwalker.jp",
+                                      "path":cookie.path or "/"})
+            if refreshed:
+                try: save_bookwalker_cookies(refreshed)
+                except Exception: pass
+            return "signed_in","BOOK☆WALKER session is valid."
+        if re.search(r"BW_IS_LOGIN\s*=\s*false",r.text,re.I):
+            return "signed_out","BOOK☆WALKER reports that this session is signed out."
+        return "unavailable","BOOK☆WALKER login state could not be determined."
+    except Exception as e:
+        return "unavailable",f"{type(e).__name__}: {e}"
+
+def check_dmm_access():
+    """Return (status, detail) for DMM Books regional access."""
+    try:
+        r=requests.get("https://book.dmm.com/",timeout=15,allow_redirects=True,
+                       headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36",
+                                "Accept-Language":"ja-JP,ja;q=0.9,en;q=0.6"})
+        final=urlparse(r.url)
+        host=(final.hostname or "").lower()
+        if host=="accounts.dmm.com" and final.path.startswith("/service/login/"):
+            return "jp_required","DMM Books redirected to the DMM login/access page."
+        r.raise_for_status()
+        if host=="book.dmm.com" or host.endswith(".book.dmm.com"):
+            return "available","DMM Books is reachable from this network."
+        return "unavailable",f"Unexpected DMM destination: {r.url}"
+    except Exception as e:
+        return "unavailable",f"{type(e).__name__}: {e}"
 
 def bookwalker_login_helper():
     """Run the real BOOK☆WALKER site in a persistent Edge WebView2 profile.
