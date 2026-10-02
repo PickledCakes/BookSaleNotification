@@ -109,7 +109,11 @@ class Provider:
     def best(self,title,author=""):
         candidates=self.search(title,author)
         self.c.logger(f"[{self.store}] Parsed {len(candidates)} candidate(s)")
-        for x in candidates:x.confidence=score(title,x.title,author,x.author)
+        for x in candidates:
+            # Provider-specific resolvers may already have stronger identity evidence
+            # (for example BookLive exact title_id + /vol_no/NNN). Do not throw that
+            # away by replacing it with a lower generic title-similarity score.
+            x.confidence=max(x.confidence,score(title,x.title,author,x.author))
         candidates.sort(key=lambda x:x.confidence,reverse=True)
         for x in candidates[:3]:
             self.c.logger(f"[{self.store}] candidate {x.confidence:.3f} • {x.title}")
@@ -185,6 +189,7 @@ class BookLive(Provider):
                             if not edition_compatible(title,full.title):
                                 self.c.logger(f"[{self.store}] Rejected resolved volume: edition/type mismatch • {full.title}")
                                 continue
+                            full.confidence=1.0
                             self.c.logger(f"[{self.store}] Exact requested volume found: {full.title}")
                             return [full]
                     except Exception as e:
