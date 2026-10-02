@@ -1148,6 +1148,8 @@ class App(tk.Tk):
                     s+=f"  +{o['reward_pct']:g}%pt"
             elif o["store"]=="BOOK☆WALKER" and o["reward_value"]:
                 s+=f"  +{o['reward_value']:,} coin"
+            elif o["store"]=="Amazon" and o["reward_value"]:
+                s+=f"  +{o['reward_value']:,} pt"
         if o["observed_at"]:
             s += "\n" + str(o["observed_at"])[:16]
         return s
@@ -1164,8 +1166,9 @@ class App(tk.Tk):
             if "booklive" in u: return "BookLive"
             if "bookwalker" in u: return "BOOK☆WALKER"
             if "dmm" in u: return "DMM"
+            if "amazon" in u or "media-amazon" in u: return "Amazon"
             return ""
-        priority={"DMM":1,"BOOK☆WALKER":2,"BookLive":3}
+        priority={"Amazon":1,"DMM":2,"BOOK☆WALKER":3,"BookLive":4}
 
         row=self.db.cx.execute("SELECT cover_url,cover_path FROM books WHERE id=?",(bid,)).fetchone()
         if row and row["cover_path"] and Path(row["cover_path"]).exists():
@@ -1192,7 +1195,7 @@ class App(tk.Tk):
             self.log(f"[Cover] {store}: {e}")
 
     def store_enabled(self,store):
-        keys={"BookLive":"store_booklive_enabled","BOOK☆WALKER":"store_bookwalker_enabled","DMM":"store_dmm_enabled"}
+        keys={"BookLive":"store_booklive_enabled","BOOK☆WALKER":"store_bookwalker_enabled","DMM":"store_dmm_enabled","Amazon":"store_amazon_enabled"}
         key=keys.get(store)
         return True if not key else self.db.get_setting(key,"1")=="1"
 
@@ -1201,7 +1204,7 @@ class App(tk.Tk):
 
     def apply_store_columns(self):
         visible=["title"]
-        store_columns={"BookLive":"booklive","BOOK☆WALKER":"bookwalker","DMM":"dmm"}
+        store_columns={"BookLive":"booklive","BOOK☆WALKER":"bookwalker","DMM":"dmm","Amazon":"amazon"}
         for store,column_id in store_columns.items():
             if self.store_enabled(store):
                 visible.append(column_id)
@@ -1282,7 +1285,7 @@ class App(tk.Tk):
                                    else " · ".join(cheapest))
             vals=(wrapped_titles.get(b["id"],b["title"]),self.price_text(offers.get("BookLive")),
                   self.price_text(offers.get("BOOK☆WALKER")),self.price_text(offers.get("DMM")),
-                  lowtxt,len(enabled_matched))
+                  self.price_text(offers.get("Amazon")),lowtxt,len(enabled_matched))
             photo=""
             cp=b["cover_path"] if "cover_path" in b.keys() else ""
             if show_covers and cp and Image is not None and Path(cp).exists():
@@ -1298,8 +1301,6 @@ class App(tk.Tk):
         with open(path,"r",encoding="utf-8",errors="ignore") as f: soup=BeautifulSoup(f,"html.parser")
         store=forced_store or detect_store(soup,os.path.basename(path))
         if not store: raise ValueError("Could not identify the store from this HTML file.")
-        if store.startswith("Amazon"):
-            raise ValueError("Amazon parsing is intentionally disabled in 1.1. This phase tests DMM, BookLive and BOOK☆WALKER only.")
         offers=PARSERS[store](soup); added=0; existing=0
         for o in offers:
             _bid,isnew=self.db.import_offer(o,self.current_list_id)
@@ -1308,7 +1309,7 @@ class App(tk.Tk):
 
     def _store_from_product_url(self, url):
         url=(url or "").strip()
-        for store in STORES:
+        for store in MANUAL_URL_STORES:
             if valid_store_url(store,url):
                 return store
         return None
@@ -1360,7 +1361,7 @@ class App(tk.Tk):
 
                 # Explicit manual add always checks all three stores, regardless of the
                 # automatic-update enable/disable toggles.
-                for store in STORES:
+                for store in SEARCH_STORES:
                     if store==source_store: continue
                     self.after(0,lambda st=store:self.status.set(f"Searching {st}…"))
                     self.log(f"[Manual add] Searching {store} for: {primary.title}")
@@ -1396,7 +1397,7 @@ class App(tk.Tk):
 
             self.refresh()
             lines=[]
-            for store in STORES:
+            for store in SEARCH_STORES:
                 o=found.get(store)
                 if not o:
                     lines.append(f"{store}: no confident match")
@@ -1420,22 +1421,25 @@ class App(tk.Tk):
         except Exception as e: messagebox.showerror("Import failed",str(e))
 
     def import_folder(self):
-        d=filedialog.askdirectory(title="Choose folder containing DMM, BookLive and BOOK☆WALKER HTML files")
+        d=filedialog.askdirectory(title="Choose folder containing saved wishlist/list HTML files")
         if not d:return
         self.auto_backup()
-        results=[]; errors=[]
+        totals={}; errors=[]
         for p in Path(d).glob("*.htm*"):
             try:
                 with open(p,"r",encoding="utf-8",errors="ignore") as f: soup=BeautifulSoup(f,"html.parser")
                 st=detect_store(soup,p.name)
-                if st and st in PARSERS and not any(x[0]==st for x in results):
-                    offers=PARSERS[st](soup); added=0
+                if st and st in PARSERS:
+                    offers=PARSERS[st](soup); added=existing=0
                     for o in offers:
-                        _bid,isnew=self.db.import_offer(o,self.current_list_id); added+=1 if isnew else 0
-                    results.append((st,len(offers),added))
+                        _bid,isnew=self.db.import_offer(o,self.current_list_id)
+                        added+=1 if isnew else 0; existing+=0 if isnew else 1
+                    rec=totals.setdefault(st,[0,0,0,0])
+                    rec[0]+=1; rec[1]+=len(offers); rec[2]+=added; rec[3]+=existing
             except Exception as e: errors.append(f"{p.name}: {e}")
         self.refresh()
-        msg="\n".join(f"{s}: {n} parsed • {added} new" for s,n,added in results) or "No recognized wishlist HTML found."
+        msg="\n".join(f"{s}: {v[0]} file(s) • {v[1]} parsed • {v[2]} new • {v[3]} existing"
+                      for s,v in totals.items()) or "No recognized wishlist HTML found."
         if errors: msg+="\n\nErrors:\n"+"\n".join(errors[:5])
         messagebox.showinfo("Folder import",msg)
 
@@ -1477,20 +1481,24 @@ class App(tk.Tk):
 
         outer=ttk.Frame(win,padding=14); outer.pack(fill="both",expand=True)
         ttk.Label(outer,text=book["title"],font=("Segoe UI",11,"bold"),wraplength=850).pack(anchor="w",pady=(0,12))
-        ttk.Label(outer,text="Current database URLs for the three active stores. Editing a URL manually locks that store match.",
+        ttk.Label(outer,text="Manual URL editing is available for BookLive, BOOK☆WALKER and DMM. Amazon remains HTML-import only in this phase.",
                   foreground="#555").pack(anchor="w",pady=(0,10))
 
         vars={}
         grid=ttk.Frame(outer); grid.pack(fill="x",expand=True)
-        for i,store in enumerate(STORES):
+        for i,store in enumerate(MANUAL_URL_STORES):
             ttk.Label(grid,text=store,width=14).grid(row=i,column=0,sticky="w",pady=5)
             v=tk.StringVar(value=current.get(store,""))
             vars[store]=v
             ent=ttk.Entry(grid,textvariable=v)
             ent.grid(row=i,column=1,sticky="ew",padx=(8,6),pady=5)
-            def open_url(v=v):
+            def open_url(v=v,store=store):
                 u=v.get().strip()
-                if u: webbrowser.open(u)
+                if not u:return
+                if not valid_store_url(store,u):
+                    messagebox.showerror("Invalid store URL",f"Blocked untrusted or invalid {store} URL.\n\n{u}")
+                    return
+                webbrowser.open(u)
             ttk.Button(grid,text="Open",command=open_url,width=8).grid(row=i,column=2,pady=5)
         grid.columnconfigure(1,weight=1)
 
@@ -1534,19 +1542,23 @@ class App(tk.Tk):
     def open_store(self):
         bid=self.selected()
         if not bid:return
-        store=simpledialog.askstring("Open store","Store name: BookLive, BOOK☆WALKER, or DMM")
+        store=simpledialog.askstring("Open store","Store name: BookLive, BOOK☆WALKER, DMM, or Amazon")
         if store not in STORES:return
         row=self.db.cx.execute("SELECT url FROM offers WHERE book_id=? AND store=?",(bid,store)).fetchone()
-        if row and row["url"]: webbrowser.open(row["url"])
+        if row and row["url"]:
+            if valid_store_url(store,row["url"]): webbrowser.open(row["url"])
+            else: messagebox.showerror("Invalid store URL","Blocked an invalid or untrusted stored URL.")
 
     def double_click(self,event):
         row=self.tree.identify_row(event.y); col=self.tree.identify_column(event.x)
         if not row:return
-        mapping={"#2":"BookLive","#3":"BOOK☆WALKER","#4":"DMM"}
+        mapping={"#2":"BookLive","#3":"BOOK☆WALKER","#4":"DMM","#5":"Amazon"}
         store=mapping.get(col)
         if not store:return
         o=self.db.cx.execute("SELECT url FROM offers WHERE book_id=? AND store=?",(int(row),store)).fetchone()
-        if o and o["url"]: webbrowser.open(o["url"])
+        if o and o["url"]:
+            if valid_store_url(store,o["url"]): webbrowser.open(o["url"])
+            else: messagebox.showerror("Invalid store URL","Blocked an invalid or untrusted stored URL.")
 
     def delete_selected(self):
         ids=self.selected_ids()
