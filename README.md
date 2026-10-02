@@ -7,7 +7,7 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **DMM Books**
 - **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.9.1-beta.1**
+> Current version: **1.9.1-beta.2**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
@@ -38,6 +38,9 @@ Book Sale Notification keeps one combined watchlist, matches the same volume acr
 - Settings includes BOOK☆WALKER and DMM connection health checks; previously valid BOOK☆WALKER sessions are monitored and users are warned once if the session expires.
 - Settings includes **Test sale notification** and **Test multiple sale notifications** controls that simulate one or three qualifying books without changing the database or price history.
 - When multiple distinct books qualify during one price refresh, sale alerts are grouped into a single desktop/tray summary instead of sending one notification per book.
+- Active sale state is persisted per store offer. Sale books are highlighted in the main table, sale stores are marked, and the cheapest current store is called out.
+- **Show only books on sale** filters the main list to currently active sales.
+- The **Sales** window keeps sale events newest-first, tracks read/unread status, shows whether a sale is still active, and provides store buttons for current sale offers.
 
 Matching is intentionally conservative. It is better for the app to leave a store blank than attach the wrong volume or edition.
 
