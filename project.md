@@ -500,3 +500,17 @@ For 1.9:
 - confirm behavior with the user
 - only then consider it fixed
 - keep stable releases clean and infrequent
+
+
+---
+
+## 1.9.1 notification work
+
+### beta.1 — Grouped sale notifications
+
+- Sale events from one refresh are grouped by canonical book ID before desktop notification delivery.
+- One qualifying book keeps the detailed store/price notification.
+- Two or more distinct qualifying books produce one summary notification with the total number of books, preventing notification spam during large sale periods.
+- Multiple store events for the same book count as one book.
+- Settings includes a three-book grouped-notification simulation for testing without changing price/history data.
+- This is phase 1 of the notification upgrade. Sale highlighting/filtering and an in-app sale notification center are planned for later phases after beta.1 testing.
