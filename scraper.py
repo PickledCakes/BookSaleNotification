@@ -175,7 +175,13 @@ class BookLive(Provider):
                         full=self.product(target)
                         fb,fv=parse_volume(full.title)
                         base_sim=SequenceMatcher(None,key(stem),key(fb)).ratio()
-                        if fv==wanted_vol and base_sim>=.80:
+                        um=re.search(r"/vol_no/(\d+)",full.url or target,re.I)
+                        url_vol=int(um.group(1)) if um else None
+                        # Prefer an explicit volume in the title when present, but also
+                        # trust the exact canonical /vol_no/NNN URL we deliberately fetched.
+                        # This covers BookLive metadata variants where og:title omits "1".
+                        volume_ok=(fv==wanted_vol) or (fv is None and url_vol==wanted_vol)
+                        if volume_ok and base_sim>=.80:
                             if not edition_compatible(title,full.title):
                                 self.c.logger(f"[{self.store}] Rejected resolved volume: edition/type mismatch • {full.title}")
                                 continue
@@ -189,12 +195,16 @@ class BookLive(Provider):
 
     def product(self,url):
         html=self.c.get(url); soup=BeautifulSoup(html,"html.parser")
-        og=soup.select_one('meta[property="og:title"]')
-        title=space(og.get("content","") if og else "")
-        title=re.sub(r"\s*[|｜]\s*ブックライブ.*$","",title)
+        # Prefer the visible product heading. BookLive's og:title can be a series-level
+        # title that omits the volume number even when the actual page heading includes it.
+        h=(soup.select_one("h1#product_display_1") or
+           soup.select_one(".product_title h1") or
+           soup.select_one("h1"))
+        title=space(h.get_text(" ",strip=True)) if h else ""
         if not title:
-            h=soup.select_one("h1#product_display_1") or soup.select_one("h1")
-            title=space(h.get_text(" ",strip=True)) if h else ""
+            og=soup.select_one('meta[property="og:title"]')
+            title=space(og.get("content","") if og else "")
+        title=re.sub(r"\s*[|｜]\s*ブックライブ.*$","",title)
         can=soup.select_one('link[rel="canonical"]'); u=can.get("href",url) if can else url
         m=re.search(r"title_id/(\d+)/vol_no/(\d+)",u)
 
