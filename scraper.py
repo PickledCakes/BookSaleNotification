@@ -383,7 +383,7 @@ class DMM(Provider):
     store="DMM"; base="https://book.dmm.com"
 
     def _get(self,url):
-        html=self._get(url)
+        html=self.c.get(url)
         final=urlparse(self.c.last_url or url)
         host=(final.hostname or "").lower()
         # Outside Japan DMM Books commonly redirects search/product requests to
