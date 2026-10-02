@@ -975,6 +975,7 @@ class App(tk.Tk):
         self.main_pane.add(self.table_frame,weight=4)
         self.main_pane.add(self.activity_frame,weight=1)
         self.main_pane.bind("<Configure>",self._on_main_pane_configure,add="+")
+        self.main_pane.bind("<ButtonRelease-1>",self._on_main_pane_configure,add="+")
 
         self.tree=ttk.Treeview(self.table_frame,columns=cols,show="tree headings",selectmode="extended")
         for c in cols:
@@ -1053,7 +1054,7 @@ class App(tk.Tk):
         new=self.tree.column("title","width") if hasattr(self,"tree") else 0
         # Re-wrap titles after a meaningful width change. This is cheap compared with
         # leaving text clipped, and is debounced while the user drags/resizes.
-        if old and abs(new-old)>=8 and self.db.get_setting("show_covers","1")!="1":
+        if old and abs(new-old)>=8:
             self.refresh()
 
     def _resize_table_columns(self):
