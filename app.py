@@ -24,8 +24,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.9.1-beta.1"
-APP_VERSION = "1.9.1-beta.1"
+APP_NAME = "Book Sale Notification 1.9.1-beta.2"
+APP_VERSION = "1.9.1-beta.2"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -823,6 +823,24 @@ class DB:
         CREATE TABLE IF NOT EXISTS lists(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, sort_order INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS list_books(list_id INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE, book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE, PRIMARY KEY(list_id,book_id));
         CREATE TABLE IF NOT EXISTS trash(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, payload TEXT NOT NULL, deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS sale_state(
+          offer_id INTEGER PRIMARY KEY REFERENCES offers(id) ON DELETE CASCADE,
+          active INTEGER NOT NULL DEFAULT 0,
+          reference_price INTEGER, sale_price INTEGER,
+          detected_at TEXT, last_seen_at TEXT, ended_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sale_events(
+          id INTEGER PRIMARY KEY,
+          offer_id INTEGER NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
+          book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+          store TEXT NOT NULL,
+          detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          ended_at TEXT,
+          sale_price INTEGER, reference_price INTEGER, discount_pct REAL,
+          is_read INTEGER NOT NULL DEFAULT 0,
+          active INTEGER NOT NULL DEFAULT 1
+        );
         """)
         self.cx.execute("INSERT OR IGNORE INTO lists(id,name,sort_order) VALUES(1,'My List',0)")
         self.cx.execute("INSERT OR IGNORE INTO list_books(list_id,book_id) SELECT 1,id FROM books WHERE status!='purchased'")
@@ -1017,6 +1035,89 @@ class DB:
         self.cx.commit()
         return book_id
 
+    def update_sale_state_for_refresh(self,book_id,store,new_price,new_list_price):
+        """Persist whether this store offer is currently on sale.
+
+        A sale remains active across refreshes even when the storefront later omits
+        its list price. The remembered reference price is cleared only when the
+        cash price returns to or above that reference.
+        """
+        offer=self.cx.execute("SELECT id,price,list_price FROM offers WHERE book_id=? AND store=?",
+                              (book_id,store)).fetchone()
+        if not offer or new_price is None:return None
+        state=self.cx.execute("SELECT * FROM sale_state WHERE offer_id=?",(offer["id"],)).fetchone()
+        old_active=bool(state and state["active"])
+        remembered=state["reference_price"] if state else None
+
+        reference=None
+        for candidate in (new_list_price,offer["list_price"],remembered,offer["price"]):
+            if candidate is not None and candidate>new_price:
+                reference=int(candidate); break
+
+        active=reference is not None and new_price<reference
+        now=datetime.now().isoformat(" ",timespec="seconds")
+        if active:
+            detected=(state["detected_at"] if old_active and state and state["detected_at"] else now)
+            self.cx.execute("""INSERT INTO sale_state(offer_id,active,reference_price,sale_price,detected_at,last_seen_at,ended_at)
+                VALUES(?,1,?,?,?,?,NULL)
+                ON CONFLICT(offer_id) DO UPDATE SET active=1,reference_price=excluded.reference_price,
+                sale_price=excluded.sale_price,detected_at=excluded.detected_at,last_seen_at=excluded.last_seen_at,ended_at=NULL""",
+                (offer["id"],reference,new_price,detected,now))
+            discount=100.0*(reference-new_price)/reference if reference else None
+            if not old_active:
+                self.cx.execute("""INSERT INTO sale_events
+                    (offer_id,book_id,store,detected_at,last_seen_at,sale_price,reference_price,discount_pct,is_read,active)
+                    VALUES(?,?,?,?,?,?,?,?,0,1)""",
+                    (offer["id"],book_id,store,now,now,new_price,reference,discount))
+            else:
+                self.cx.execute("""UPDATE sale_events SET last_seen_at=?,sale_price=?,reference_price=?,discount_pct=?,active=1,ended_at=NULL
+                    WHERE id=(SELECT id FROM sale_events WHERE offer_id=? AND active=1 ORDER BY id DESC LIMIT 1)""",
+                    (now,new_price,reference,discount,offer["id"]))
+        else:
+            self.cx.execute("""INSERT INTO sale_state(offer_id,active,reference_price,sale_price,detected_at,last_seen_at,ended_at)
+                VALUES(?,0,?,?,NULL,?,?)
+                ON CONFLICT(offer_id) DO UPDATE SET active=0,sale_price=excluded.sale_price,
+                last_seen_at=excluded.last_seen_at,ended_at=excluded.ended_at""",
+                (offer["id"],remembered,new_price,now,now))
+            if old_active:
+                self.cx.execute("UPDATE sale_events SET active=0,ended_at=?,last_seen_at=? WHERE offer_id=? AND active=1",
+                                (now,now,offer["id"]))
+
+        return {"offer_id":offer["id"],"active":active,"started":active and not old_active,
+                "reference":reference,"price":new_price}
+
+    def active_sale_rows(self,book_id=None):
+        sql="""SELECT ss.*,o.book_id,o.store,o.url,o.price,o.list_price,b.title
+               FROM sale_state ss JOIN offers o ON o.id=ss.offer_id
+               JOIN books b ON b.id=o.book_id
+               WHERE ss.active=1 AND b.status='active'"""
+        args=[]
+        if book_id is not None:
+            sql+=" AND o.book_id=?"; args.append(book_id)
+        sql+=" ORDER BY ss.detected_at DESC,o.store"
+        return self.cx.execute(sql,args).fetchall()
+
+    def active_sale_book_ids(self):
+        return {r["book_id"] for r in self.cx.execute("""SELECT DISTINCT o.book_id
+            FROM sale_state ss JOIN offers o ON o.id=ss.offer_id JOIN books b ON b.id=o.book_id
+            WHERE ss.active=1 AND b.status='active'""")}
+
+    def sale_inbox_books(self):
+        return self.cx.execute("""SELECT b.id book_id,b.title,MAX(se.detected_at) latest_sale,
+            SUM(CASE WHEN se.is_read=0 THEN 1 ELSE 0 END) unread_events,
+            SUM(CASE WHEN se.active=1 THEN 1 ELSE 0 END) active_events
+            FROM sale_events se JOIN books b ON b.id=se.book_id
+            GROUP BY b.id,b.title ORDER BY latest_sale DESC""").fetchall()
+
+    def unread_sale_count(self):
+        return self.cx.execute("SELECT COUNT(DISTINCT book_id) n FROM sale_events WHERE is_read=0").fetchone()["n"]
+
+    def mark_sale_book_read(self,book_id):
+        self.cx.execute("UPDATE sale_events SET is_read=1 WHERE book_id=?",(book_id,)); self.cx.commit()
+
+    def mark_all_sales_read(self):
+        self.cx.execute("UPDATE sale_events SET is_read=1"); self.cx.commit()
+
     def set_cover(self,bid,url,path):
         self.cx.execute("UPDATE books SET cover_url=?,cover_path=? WHERE id=?",(url,path,bid)); self.cx.commit()
 
@@ -1190,6 +1291,7 @@ class App(tk.Tk):
         UI_LANG=self.db.get_setting("ui_language","en")
         self.title(APP_NAME)
         self.current_list_id=1; self.archived_view=False
+        self.show_sales_only=tk.BooleanVar(value=False)
         self.providers=live_providers(float(self.db.get_setting("request_delay_seconds","1.25")),
                                       self.log,load_bookwalker_cookies())
         self._build()
@@ -1354,6 +1456,8 @@ class App(tk.Tk):
         ttk.Button(top,text=("English" if UI_LANG=="ja" else "日本語"),width=8,
                    command=self.toggle_language).pack(side="left",padx=(12,0))
         ttk.Button(top,text="Settings",command=self.settings_dialog).pack(side="right",padx=4)
+        self.sales_button=ttk.Button(top,text="Sales",command=self.sale_notification_center)
+        self.sales_button.pack(side="right",padx=4)
         ttk.Button(top,text="Check for Updates",command=self.check_for_updates).pack(side="right",padx=4)
         ttk.Button(top,text="Recently Deleted",command=self.recently_deleted).pack(side="right",padx=4)
         ttk.Button(top,text="Backup / Share",command=self.backup_share_dialog).pack(side="right",padx=4)
@@ -1370,6 +1474,8 @@ class App(tk.Tk):
         ttk.Label(bar,text="Search:").pack(side="left")
         self.search=tk.StringVar(); e=ttk.Entry(bar,textvariable=self.search,width=38); e.pack(side="left",padx=6)
         e.bind("<KeyRelease>",lambda _e:self.refresh())
+        ttk.Checkbutton(bar,text="Show only books on sale",variable=self.show_sales_only,
+                        command=self.refresh).pack(side="left",padx=(8,4))
 
         ttk.Button(bar,text="Delete",command=self.delete_selected).pack(side="right",padx=4)
         ttk.Button(bar,text="History",command=self.show_history).pack(side="right",padx=4)
@@ -1395,6 +1501,7 @@ class App(tk.Tk):
         self.main_pane.bind("<ButtonRelease-1>",self._on_main_pane_configure,add="+")
 
         self.tree=ttk.Treeview(self.table_frame,columns=cols,show="tree headings",selectmode="extended")
+        self.tree.tag_configure("sale",background="#fff3bf")
         for c in cols:
             self.tree.heading(c,text=headings[c],command=lambda x=c:self.sort_by(x))
             self.tree.column(c,width=widths[c],minwidth=55,stretch=False,
@@ -1688,6 +1795,9 @@ class App(tk.Tk):
             self.option_add('*Listbox.selectBackground',sel)
             self.option_add('*Listbox.selectForeground','white')
 
+        if hasattr(self,"tree"):
+            self.tree.tag_configure("sale",background=("#3a3215" if mode=="dark" else "#fff3bf"))
+
         # Existing and subsequently-created child windows inherit ttk styles.
         # Explicitly color any current Tk/Toplevel surfaces.
         def paint_native(widget):
@@ -1711,7 +1821,7 @@ class App(tk.Tk):
         if threading.current_thread() is threading.main_thread(): append()
         else: self.after(0,append)
 
-    def price_text(self,o):
+    def price_text(self,o,sale=False,cheapest_sale=False):
         if not o: return "—"
         price=o["price"]
         if o["store"]=="BOOK☆WALKER" and self.db.get_setting("bw_overseas_tax","0")=="1":
@@ -1721,6 +1831,8 @@ class App(tk.Tk):
                 price=o["tax_ex_price"]
         if price is None: return "?"
         s=f"¥{price:,}"
+        if sale:
+            s=("★ SALE " if cheapest_sale else "SALE ")+s
         if self.db.get_setting("include_direct_rewards","1")=="1":
             if o["store"]=="DMM":
                 if o["reward_value"]:
@@ -1839,6 +1951,11 @@ class App(tk.Tk):
         show_covers,cover_size,(cover_w,cover_h,_cw,_rh)=self.cover_view()
         for x in self.tree.get_children(): self.tree.delete(x)
         rows=self.db.rows(self.search.get().strip(),False,self.current_list_id,self.archived_view)
+        active_sales=self.db.active_sale_rows()
+        sale_by_book={}
+        for sr in active_sales:sale_by_book.setdefault(sr["book_id"],{})[sr["store"]]=sr
+        if self.show_sales_only.get() and not self.archived_view:
+            rows=[item for item in rows if item[0]["id"] in sale_by_book]
         wrapped_titles={}
         max_lines=2  # store price + observation timestamp already needs two lines
         title_width=self.tree.column("title","width") or 500
@@ -1867,9 +1984,17 @@ class App(tk.Tk):
             if low is not None:
                 lowtxt += "\n" + (ui_tr("Same") if len(enabled_matched)>=2 and len(cheapest)==len(enabled_matched)
                                    else " · ".join(cheapest))
-            vals=(wrapped_titles.get(b["id"],b["title"]),self.price_text(offers.get("BookLive")),
-                  self.price_text(offers.get("BOOK☆WALKER")),self.price_text(offers.get("DMM")),
-                  self.price_text(offers.get("Amazon")),lowtxt,len(enabled_matched))
+            book_sales=sale_by_book.get(b["id"],{})
+            active_sale_prices=[(r["sale_price"],st) for st,r in book_sales.items()
+                                if self.store_enabled(st) and r["sale_price"] is not None]
+            cheapest_sale_price=min((p for p,_ in active_sale_prices),default=None)
+            cheapest_sale_stores={st for p,st in active_sale_prices if p==cheapest_sale_price} if cheapest_sale_price is not None else set()
+            vals=(wrapped_titles.get(b["id"],b["title"]),
+                  self.price_text(offers.get("BookLive"),"BookLive" in book_sales,"BookLive" in cheapest_sale_stores),
+                  self.price_text(offers.get("BOOK☆WALKER"),"BOOK☆WALKER" in book_sales,"BOOK☆WALKER" in cheapest_sale_stores),
+                  self.price_text(offers.get("DMM"),"DMM" in book_sales,"DMM" in cheapest_sale_stores),
+                  self.price_text(offers.get("Amazon"),"Amazon" in book_sales,"Amazon" in cheapest_sale_stores),
+                  lowtxt,len(enabled_matched))
             photo=""
             cp=b["cover_path"] if "cover_path" in b.keys() else ""
             if show_covers and cp and Image is not None and Path(cp).exists():
@@ -1878,8 +2003,71 @@ class App(tk.Tk):
                     im.thumbnail((cover_w,cover_h),Image.Resampling.LANCZOS)
                     photo=ImageTk.PhotoImage(im); self._cover_photos[b["id"]]=photo
                 except Exception: pass
-            self.tree.insert("", "end", iid=str(b["id"]), image=photo, values=vals)
+            tags=("sale",) if book_sales else ()
+            self.tree.insert("", "end", iid=str(b["id"]), image=photo, values=vals,tags=tags)
+        self._update_sales_button()
         self.status.set(f"{len(rows)} canonical books shown • Double-click a store cell to open its public product page")
+
+    def _update_sales_button(self):
+        if not hasattr(self,"sales_button"):return
+        n=self.db.unread_sale_count()
+        self.sales_button.configure(text=(f"Sales ({n})" if n else "Sales"))
+
+    def sale_notification_center(self):
+        w=tk.Toplevel(self); w.title("Sales"); w.geometry("900x620"); w.minsize(760,500)
+        outer=ttk.Frame(w,padding=12); outer.pack(fill="both",expand=True)
+        ttk.Label(outer,text="Sale notifications",font=("Segoe UI",13,"bold")).pack(anchor="w")
+        ttk.Label(outer,text="Newest detected sales first. Select a book to open any store where it is currently on sale.",
+                  wraplength=820).pack(anchor="w",pady=(2,8))
+
+        cols=("book","detected","status","read")
+        t=ttk.Treeview(outer,columns=cols,show="headings",selectmode="browse")
+        for col,text,width in (("book","Book",500),("detected","Latest sale",150),
+                               ("status","Status",110),("read","Read",70)):
+            t.heading(col,text=text); t.column(col,width=width,anchor="w" if col=="book" else "center")
+        t.pack(fill="both",expand=True)
+
+        storebar=ttk.LabelFrame(outer,text="Current sale store links",padding=8)
+        storebar.pack(fill="x",pady=(8,0))
+        action=ttk.Frame(outer); action.pack(fill="x",pady=(8,0))
+
+        def fill():
+            for iid in t.get_children():t.delete(iid)
+            for r in self.db.sale_inbox_books():
+                status="On sale" if r["active_events"] else "Ended"
+                read="Unread" if r["unread_events"] else "Read"
+                t.insert("","end",iid=str(r["book_id"]),values=(r["title"],r["latest_sale"],status,read))
+            self._update_sales_button()
+
+        def rebuild_store_buttons(event=None):
+            for child in storebar.winfo_children():child.destroy()
+            sel=t.selection()
+            if not sel:
+                ttk.Label(storebar,text="Select a book above.").pack(anchor="w"); return
+            bid=int(sel[0]); rows=self.db.active_sale_rows(bid)
+            if not rows:
+                ttk.Label(storebar,text="This sale has ended.").pack(anchor="w"); return
+            min_price=min((r["sale_price"] for r in rows if r["sale_price"] is not None),default=None)
+            for r in rows:
+                label=f"{r['store']}  ¥{r['sale_price']:,}" if r["sale_price"] is not None else r["store"]
+                if min_price is not None and r["sale_price"]==min_price:label+="  ★ cheapest"
+                url=r["url"]; store=r["store"]
+                ttk.Button(storebar,text=label,
+                    command=lambda u=url,s=store:(webbrowser.open(u) if valid_store_url(s,u)
+                                                  else messagebox.showerror("Invalid store URL","Blocked an invalid or untrusted stored URL."))).pack(side="left",padx=(0,6))
+
+        def mark_read():
+            sel=t.selection()
+            if not sel:return
+            self.db.mark_sale_book_read(int(sel[0])); fill(); rebuild_store_buttons()
+        def mark_all():
+            self.db.mark_all_sales_read(); fill(); rebuild_store_buttons()
+
+        ttk.Button(action,text="Close",command=w.destroy).pack(side="right")
+        ttk.Button(action,text="Mark all as read",command=mark_all).pack(side="right",padx=(0,6))
+        ttk.Button(action,text="Mark selected as read",command=mark_read).pack(side="right",padx=(0,6))
+        t.bind("<<TreeviewSelect>>",rebuild_store_buttons)
+        fill(); rebuild_store_buttons()
 
     def parse_file(self,path,forced_store=None):
         with open(path,"r",encoding="utf-8",errors="ignore") as f: soup=BeautifulSoup(f,"html.parser")
@@ -2915,12 +3103,22 @@ class App(tk.Tk):
 
         if len(books)>1:
             count=len(books)
+            titles=[]
+            for grouped in books.values():
+                title=(grouped[0].get("title") or "Book").strip()
+                if title and title not in titles:titles.append(title)
+            preview=titles[:3]
+            remaining=max(0,count-len(preview))
             if UI_LANG=="ja":
                 heading=f"{count}冊の書籍がセール中"
-                msg=f"{count}冊の書籍で通知条件に合う新しいセール価格を検出しました。"
+                msg="\n".join("• "+x for x in preview)
+                if remaining:msg+=f"\n…ほか {remaining}冊"
+                msg+=f"\n\nアプリの「Sales」で詳細を確認できます。"
             else:
                 heading=f"{count} books on sale"
-                msg=f"{count} qualifying books have new sale prices."
+                msg="\n".join("• "+x for x in preview)
+                if remaining:msg+=f"\n…and {remaining} more"
+                msg+="\n\nOpen Sales in the app for details."
             if test:
                 msg+=("\nまとめ通知のテストです。" if UI_LANG=="ja" else "\nThis is a grouped notification test.")
             self._desktop_notification(heading,msg)
@@ -3017,6 +3215,7 @@ class App(tk.Tk):
                             brow=worker_db.cx.execute("SELECT title FROM books WHERE id=?",(bid,)).fetchone()
                             r.title=brow["title"] if brow else ""
                         fetched=self._offer_from_live(r); fetched.url=url
+                        sale_state=worker_db.update_sale_state_for_refresh(bid,store,r.price,r.list_price)
                         sale_event=self._sale_event_for_refresh(worker_db,bid,store,r.price,r.list_price)
                         saved_bid=worker_db.update_offer_for_book(bid,store,fetched); ok+=1
                         if sale_event:sale_events.append(sale_event)
