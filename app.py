@@ -746,6 +746,8 @@ class DB:
         return True
 
     def set_url(self, book_id, store, url):
+        if store not in MANUAL_URL_STORES or not valid_store_url(store,url):
+            raise ValueError(f"Invalid or non-editable {store} product URL")
         row=self.cx.execute("SELECT * FROM offers WHERE book_id=? AND store=?",(book_id,store)).fetchone()
         if row:
             self.cx.execute("UPDATE offers SET url=?,locked=1 WHERE id=?",(url,row["id"]))
@@ -1759,31 +1761,62 @@ class App(tk.Tk):
     def import_share(self):
         p=filedialog.askopenfilename(filetypes=[("Book Sale shared list","*.bscshare"),("JSON","*.json")])
         if not p:return
-        data=json.loads(Path(p).read_text(encoding="utf-8"))
+        try:
+            data=json.loads(Path(p).read_text(encoding="utf-8"))
+        except Exception as e:
+            messagebox.showerror("Import failed",f"Could not read shared list:\n{e}"); return
+        if not isinstance(data,dict) or data.get("type") not in (None,"book_list"):
+            messagebox.showerror("Import failed","This is not a supported shared book-list file."); return
         books=data.get("books",[])
-        # Read-only preview first; nothing changes until explicit Import All.
+        if not isinstance(books,list):
+            messagebox.showerror("Import failed","Shared list has an invalid books structure."); return
+
+        # Treat shared files as untrusted input. Preview only sane store names; every
+        # URL is validated again before it can enter the database.
+        preview=[]
+        for b in books:
+            if not isinstance(b,dict):continue
+            stores=[x.get("store","") for x in b.get("offers",[]) if isinstance(x,dict) and x.get("store") in STORES]
+            preview.append((str(b.get("title",""))[:500],", ".join(stores)))
+
         w=tk.Toplevel(self); w.title("Shared List — View only"); w.geometry("900x560")
         w.resizable(False,False)
-        ttk.Label(w,text=f"VIEW ONLY • {len(books)} books • Nothing is imported until you press Import All",
+        ttk.Label(w,text=f"VIEW ONLY • {len(preview)} books • Nothing is imported until you press Import All",
                   font=("Segoe UI",10,"bold")).pack(anchor="w",padx=10,pady=8)
         t=ttk.Treeview(w,columns=("title","stores"),show="headings")
         t.heading("title",text="Book"); t.heading("stores",text="Known stores")
         t.column("title",width=650); t.column("stores",width=180)
-        for i,b in enumerate(books):
-            t.insert("","end",iid=str(i),values=(b.get("title",""),", ".join(x.get("store","") for x in b.get("offers",[]))))
+        for i,(title,stores) in enumerate(preview):
+            t.insert("","end",iid=str(i),values=(title,stores))
         t.pack(fill="both",expand=True,padx=10)
+
         def do_import():
-            self.auto_backup('shared_list_import'); added=0
+            self.auto_backup('shared_list_import'); added=0; rejected=0; amazon_skipped=0
             name=Path(p).stem; list_id=self.db.create_list(name if name else 'Imported List')
             for b in books:
+                if not isinstance(b,dict):rejected+=1; continue
                 for od in b.get("offers",[]):
-                    o=Offer(od.get("store",""),od.get("title") or b.get("title",""),od.get("url",""),
-                            od.get("price"),od.get("list_price"),od.get("reward_pct"),od.get("reward_value"),
-                            od.get("author") or b.get("author",""),od.get("store_id",""))
-                    if o.store in STORES:
-                        self.db.import_offer(o,list_id); added+=1
+                    if not isinstance(od,dict):rejected+=1; continue
+                    store=od.get("store","")
+                    url=str(od.get("url","") or "").strip()
+                    if store=="Amazon":
+                        # Phase 1 Amazon data may only enter through saved HTML.
+                        amazon_skipped+=1; continue
+                    if store not in SEARCH_STORES or not valid_store_url(store,url):
+                        rejected+=1; continue
+                    o=Offer(store=store,title=str(od.get("title") or b.get("title",""))[:1000],
+                            url=url,price=od.get("price"),list_price=od.get("list_price"),
+                            reward_pct=od.get("reward_pct"),reward_value=od.get("reward_value"),
+                            tax_ex_price=od.get("tax_ex_price"),
+                            author=str(od.get("author") or b.get("author",""))[:500],
+                            store_id=str(od.get("store_id","") or "")[:200])
+                    self.db.import_offer(o,list_id); added+=1
             self.rebuild_list_tabs(); self.refresh(); w.destroy()
-            messagebox.showinfo("Import complete",f"Merged {len(books)} shared books ({added} store records).")
+            extra=[]
+            if rejected:extra.append(f"Rejected invalid/untrusted records: {rejected}")
+            if amazon_skipped:extra.append(f"Amazon records skipped (HTML import only in this phase): {amazon_skipped}")
+            suffix=("\n\n"+"\n".join(extra)) if extra else ""
+            messagebox.showinfo("Import complete",f"Imported {added} validated store records.{suffix}")
         ttk.Button(w,text="Import All",command=do_import).pack(side="right",padx=10,pady=10)
         ttk.Button(w,text="Close without importing",command=w.destroy).pack(side="right",pady=10)
 
@@ -1801,12 +1834,25 @@ class App(tk.Tk):
     def import_history(self):
         p=filedialog.askopenfilename(filetypes=[("Book Sale history","*.bschistory"),("JSON","*.json")])
         if not p:return
-        data=json.loads(Path(p).read_text(encoding="utf-8")); obs=data.get("observations",[])
-        self.auto_backup(); n=0
+        try:
+            data=json.loads(Path(p).read_text(encoding="utf-8"))
+        except Exception as e:
+            messagebox.showerror("Import failed",f"Could not read price history:\n{e}"); return
+        obs=data.get("observations",[]) if isinstance(data,dict) else []
+        if not isinstance(obs,list):
+            messagebox.showerror("Import failed","Price-history file has an invalid structure."); return
+        self.auto_backup(); n=0; rejected=0; amazon_skipped=0
         for x in obs:
-            o=Offer(x.get("store",""),x.get("title",""),x.get("url",""),x.get("price"),x.get("list_price"),
-                    x.get("reward_pct"),x.get("reward_value"),store_id=x.get("store_id",""))
-            if o.store not in STORES: continue
+            if not isinstance(x,dict):rejected+=1; continue
+            store=x.get("store",""); url=str(x.get("url","") or "").strip()
+            if store=="Amazon":
+                amazon_skipped+=1; continue
+            if store not in SEARCH_STORES or not valid_store_url(store,url):
+                rejected+=1; continue
+            o=Offer(store=store,title=str(x.get("title",""))[:1000],url=url,
+                    price=x.get("price"),list_price=x.get("list_price"),
+                    reward_pct=x.get("reward_pct"),reward_value=x.get("reward_value"),
+                    store_id=str(x.get("store_id","") or "")[:200])
             bid=self.db.add_offer(o)
             orow=self.db.cx.execute("SELECT id FROM offers WHERE book_id=? AND store=?",(bid,o.store)).fetchone()
             if orow:
@@ -1815,7 +1861,12 @@ class App(tk.Tk):
                     VALUES(?,?,?,?,?,?,?)""",(orow["id"],x.get("observed_at") or datetime.now().isoformat(" "),
                     x.get("price"),x.get("list_price"),x.get("reward_pct"),x.get("reward_value"),"shared"))
                 n+=1
-        self.db.cx.commit(); self.refresh(); messagebox.showinfo("History imported",f"Merged {n} historical observations.")
+        self.db.cx.commit(); self.refresh()
+        extra=[]
+        if rejected:extra.append(f"Rejected invalid/untrusted records: {rejected}")
+        if amazon_skipped:extra.append(f"Amazon records skipped (HTML import only in this phase): {amazon_skipped}")
+        suffix=("\n\n"+"\n".join(extra)) if extra else ""
+        messagebox.showinfo("History imported",f"Merged {n} historical observations.{suffix}")
 
     def settings_dialog(self):
         w=tk.Toplevel(self); w.title("Settings"); w.geometry("590x750"); w.resizable(False,False)
