@@ -1852,7 +1852,7 @@ class App(tk.Tk):
         if threading.current_thread() is threading.main_thread(): append()
         else: self.after(0,append)
 
-    def price_text(self,o,sale=False,cheapest_sale=False):
+    def price_text(self,o,sale=False,cheapest=False,book_on_sale=False):
         if not o: return "—"
         price=o["price"]
         if o["store"]=="BOOK☆WALKER" and self.db.get_setting("bw_overseas_tax","0")=="1":
@@ -1863,7 +1863,9 @@ class App(tk.Tk):
         if price is None: return "?"
         s=f"¥{price:,}"
         if sale:
-            s=("★ SALE " if cheapest_sale else "SALE ")+s
+            s=("★ SALE " if cheapest else "SALE ")+s
+        elif book_on_sale and cheapest:
+            s="★ CHEAPEST "+s
         if self.db.get_setting("include_direct_rewards","1")=="1":
             if o["store"]=="DMM":
                 if o["reward_value"]:
@@ -2016,15 +2018,12 @@ class App(tk.Tk):
                 lowtxt += "\n" + (ui_tr("Same") if len(enabled_matched)>=2 and len(cheapest)==len(enabled_matched)
                                    else " · ".join(cheapest))
             book_sales=sale_by_book.get(b["id"],{})
-            active_sale_prices=[(r["sale_price"],st) for st,r in book_sales.items()
-                                if self.store_enabled(st) and r["sale_price"] is not None]
-            cheapest_sale_price=min((p for p,_ in active_sale_prices),default=None)
-            cheapest_sale_stores={st for p,st in active_sale_prices if p==cheapest_sale_price} if cheapest_sale_price is not None else set()
+            cheapest_overall=set(cheapest) if book_sales else set()
             vals=(wrapped_titles.get(b["id"],b["title"]),
-                  self.price_text(offers.get("BookLive"),"BookLive" in book_sales,"BookLive" in cheapest_sale_stores),
-                  self.price_text(offers.get("BOOK☆WALKER"),"BOOK☆WALKER" in book_sales,"BOOK☆WALKER" in cheapest_sale_stores),
-                  self.price_text(offers.get("DMM"),"DMM" in book_sales,"DMM" in cheapest_sale_stores),
-                  self.price_text(offers.get("Amazon"),"Amazon" in book_sales,"Amazon" in cheapest_sale_stores),
+                  self.price_text(offers.get("BookLive"),"BookLive" in book_sales,"BookLive" in cheapest_overall,bool(book_sales)),
+                  self.price_text(offers.get("BOOK☆WALKER"),"BOOK☆WALKER" in book_sales,"BOOK☆WALKER" in cheapest_overall,bool(book_sales)),
+                  self.price_text(offers.get("DMM"),"DMM" in book_sales,"DMM" in cheapest_overall,bool(book_sales)),
+                  self.price_text(offers.get("Amazon"),"Amazon" in book_sales,"Amazon" in cheapest_overall,bool(book_sales)),
                   lowtxt,len(enabled_matched))
             photo=""
             cp=b["cover_path"] if "cover_path" in b.keys() else ""
