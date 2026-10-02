@@ -2853,6 +2853,69 @@ class App(tk.Tk):
                 ))
         self._run_background(work)
 
+    def _sale_event_for_refresh(self,db,book_id,store,new_price,new_list_price):
+        """Evaluate the configured notification rule before saving a refreshed price."""
+        if new_price is None:return None
+        row=db.cx.execute("SELECT id,price,list_price FROM offers WHERE book_id=? AND store=?",
+                          (book_id,store)).fetchone()
+        if not row:return None
+        book=db.cx.execute("SELECT title FROM books WHERE id=?",(book_id,)).fetchone()
+        title=(book["title"] if book else "") or "Book"
+        old_price=row["price"]; old_list=row["list_price"]
+        prior=db.cx.execute("SELECT MIN(price) low FROM price_history WHERE offer_id=? AND price IS NOT NULL",
+                            (row["id"],)).fetchone()
+        prior_low=prior["low"] if prior else None
+
+        # Prefer a current list price as the discount reference. If a store omits
+        # it, a genuine downward move from the previously observed cash price can
+        # still count as a sale.
+        reference=None
+        for candidate in (new_list_price,old_list,old_price):
+            if candidate is not None and candidate>new_price:
+                reference=candidate; break
+        discount=(100.0*(reference-new_price)/reference) if reference else None
+        changed=(old_price!=new_price) or (old_list!=new_list_price)
+
+        rule=db.get_setting("notification_rule","any_sale")
+        try:threshold=float(db.get_setting("deal_threshold","20"))
+        except Exception:threshold=20.0
+        reason=None
+        if rule=="historical_low":
+            if prior_low is not None and new_price<prior_low:
+                reason="historical_low"
+        elif rule=="good_deal":
+            if changed and discount is not None and discount>=threshold:
+                reason="good_deal"
+        else:
+            if changed and reference is not None and new_price<reference:
+                reason="any_sale"
+        if not reason:return None
+        return {"book_id":book_id,"title":title,"store":store,"price":new_price,
+                "reference":reference,"discount":discount,"prior_low":prior_low,
+                "reason":reason}
+
+    def _dispatch_sale_events(self,events):
+        for event in events or []:
+            title=event["title"]; store=event["store"]; price=event["price"]
+            ref=event.get("reference"); discount=event.get("discount")
+            if UI_LANG=="ja":
+                heading="セールを検出"
+                if event["reason"]=="historical_low":
+                    msg=f"{title}\n{store}：¥{price:,}（記録上の最安値）"
+                elif discount is not None:
+                    msg=f"{title}\n{store}：¥{price:,}（{discount:.0f}%オフ）"
+                else:
+                    msg=f"{title}\n{store}：¥{price:,}"
+            else:
+                heading="Book sale found"
+                if event["reason"]=="historical_low":
+                    msg=f"{title}\n{store}: ¥{price:,} — new recorded low"
+                elif discount is not None and ref is not None:
+                    msg=f"{title}\n{store}: ¥{price:,} ({discount:.0f}% off, was ¥{ref:,})"
+                else:
+                    msg=f"{title}\n{store}: ¥{price:,}"
+            self._desktop_notification(heading,msg)
+
     def update_prices(self):
         selected=set(self.selected_ids())
         if not selected:
@@ -2897,7 +2960,7 @@ class App(tk.Tk):
         self.auto_backup("update_"+mode)
 
         def work():
-            ok=0; failed=[]; dmm_region_blocked=False; worker_db=DB()
+            ok=0; failed=[]; dmm_region_blocked=False; sale_events=[]; worker_db=DB()
             try:
                 for i,(bid,store,url,locked) in enumerate(jobs,1):
                     self.after(0,lambda i=i,st=store:self.status.set(f"Updating {i}/{len(jobs)} • {st}"))
@@ -2913,7 +2976,9 @@ class App(tk.Tk):
                             brow=worker_db.cx.execute("SELECT title FROM books WHERE id=?",(bid,)).fetchone()
                             r.title=brow["title"] if brow else ""
                         fetched=self._offer_from_live(r); fetched.url=url
+                        sale_event=self._sale_event_for_refresh(worker_db,bid,store,r.price,r.list_price)
                         saved_bid=worker_db.update_offer_for_book(bid,store,fetched); ok+=1
+                        if sale_event:sale_events.append(sale_event)
                         if getattr(r,"cover_url",""):
                             self.after(0,lambda bid=saved_bid,store=store,url=r.cover_url:self.cache_cover(bid,store,url))
                         shown=("¥"+format(r.price,",")) if r.price is not None else "price not parsed"
@@ -2928,6 +2993,8 @@ class App(tk.Tk):
             finally:
                 worker_db.cx.close()
             self.after(0,self.refresh); self.after(0,lambda:self.status.set("Ready"))
+            if sale_events:
+                self.after(0,lambda events=list(sale_events):self._dispatch_sale_events(events))
             label={"covers":"cover page(s) checked","missing_price":"missing-price offer(s) updated","everything":"product page(s) updated"}[mode]
             msg=f"{ok}/{len(jobs)} {label}."
             if failed:msg+="\n\nFailed:\n"+"\n".join(failed[:12])
