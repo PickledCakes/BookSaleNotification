@@ -3440,12 +3440,12 @@ class App(tk.Tk):
                 heading=f"{count}冊の書籍がセール中"
                 msg="\n".join("• "+x for x in preview)
                 if remaining:msg+=f"\n…ほか {remaining}冊"
-                msg+=f"\n\nアプリの「Sales」で詳細を確認できます。"
+                msg+=f"\n\nアプリで「セール中の書籍のみ表示」をオンにすると詳細を確認できます。"
             else:
                 heading=f"{count} books on sale"
                 msg="\n".join("• "+x for x in preview)
                 if remaining:msg+=f"\n…and {remaining} more"
-                msg+="\n\nOpen Sales in the app for details."
+                msg+="\n\nTurn on Show only books on sale in the app for details."
             if test:
                 msg+=("\nまとめ通知のテストです。" if UI_LANG=="ja" else "\nThis is a grouped notification test.")
             self._desktop_notification(heading,msg)
