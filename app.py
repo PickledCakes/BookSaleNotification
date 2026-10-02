@@ -74,8 +74,8 @@ JA_UI={
         "更新内容を選択してください。既存の商品URLがある有効なストアだけにアクセスします。",
     "No matched product pages meet the selected update mode.":"選択した更新条件に該当する商品ページがありません。",
     "Edit store URLs":"ストアURLを編集",
-    "Current database URLs for the three active stores. Editing a URL manually locks that store match.":
-        "3ストアの現在の登録URLです。URLを手動編集すると、そのストアの照合結果は固定されます。",
+    "Manual URL editing is available for BookLive, BOOK☆WALKER and DMM. Amazon remains HTML-import only in this phase.":
+        "URLの手動編集はBookLive・BOOK☆WALKER・DMMのみ対応しています。Amazonは現在HTML読込のみです。",
     "Open":"開く","Save changes":"変更を保存","Invalid store URL":"無効なストアURL",
     "Add book from store URL":"ストアURLから書籍を追加",
     "Add from BookLive / BOOK☆WALKER / DMM URL":"BookLive / BOOK☆WALKER / DMM のURLから追加",
@@ -85,8 +85,8 @@ JA_UI={
     "Paste a valid BookLive, BOOK☆WALKER or DMM Books product URL.":
         "有効なBookLive、BOOK☆WALKER、またはDMM Booksの商品URLを貼り付けてください。",
     "Import wishlist HTML":"ウィッシュリストHTMLを読み込む",
-    "Choose folder containing DMM, BookLive and BOOK☆WALKER HTML files":
-        "DMM・BookLive・BOOK☆WALKERのHTMLが入ったフォルダを選択",
+    "Choose folder containing saved wishlist/list HTML files":
+        "保存したウィッシュリスト / リストHTMLが入ったフォルダを選択",
     "Import complete":"読み込み完了","Import failed":"読み込み失敗","Folder import":"フォルダ読み込み",
     "Price history — ":"価格履歴 — ","Observed":"取得日時","Store":"ストア","Cash price":"現金価格",
     "List price":"通常価格","Reward":"特典","Source":"取得元",
@@ -859,10 +859,10 @@ class App(tk.Tk):
         ttk.Button(top,text="Backup / Share",command=self.backup_share_dialog).pack(side="right",padx=4)
         ttk.Button(top,text="Import HTML…",command=self.import_html).pack(side="right",padx=4)
         ttk.Button(top,text="Add from URL…",command=self.manual_add_url).pack(side="right",padx=4)
-        ttk.Button(top,text="Import 3-store folder…",command=self.import_folder).pack(side="right",padx=4)
+        ttk.Button(top,text="Import HTML folder…",command=self.import_folder).pack(side="right",padx=4)
 
         phase=ttk.Frame(self,padding=(10,0,10,7)); phase.pack(fill="x")
-        ttk.Label(phase,text="BookLive + BOOK☆WALKER + DMM active • Amazon intentionally disabled",
+        ttk.Label(phase,text="BookLive + BOOK☆WALKER + DMM live search • Amazon HTML import/direct refresh only",
                   font=("Segoe UI",9,"bold")).pack(anchor="w")
         self.list_tabs=ttk.Notebook(self); self.list_tabs.pack(fill="x",padx=10,pady=(0,6))
         self.rebuild_list_tabs()
