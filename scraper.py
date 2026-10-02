@@ -24,7 +24,18 @@ def nfkc(s): return unicodedata.normalize("NFKC",space(s))
 def key(s): return re.sub(r"[\W_]+","",nfkc(s).casefold(),flags=re.UNICODE)
 def money(s):
     if not s:return None
-    m=re.search(r"(?:¥|￥)?\s*([0-9][0-9,]*)\s*円?",nfkc(s))
+    text=nfkc(s)
+    # Prefer an explicitly yen-labelled amount before any bare number. Amazon
+    # sometimes places discount text such as "85% OFF" beside "￥396"; the old
+    # optional-currency regex incorrectly returned 85 as the book price.
+    for pat in (
+        r"[¥￥]\s*([0-9][0-9,]*)",
+        r"([0-9][0-9,]*)\s*円",
+    ):
+        m=re.search(pat,text)
+        if m:return int(m.group(1).replace(",",""))
+    # Some storefront fields contain only the numeric amount.
+    m=re.search(r"(?<![0-9])([0-9][0-9,]*)(?![0-9%％])",text)
     return int(m.group(1).replace(",","")) if m else None
 
 def parse_volume(title):
