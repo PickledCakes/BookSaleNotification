@@ -1961,8 +1961,20 @@ class App(tk.Tk):
                     for c in books[i+1:]:
                         if c['id'] in consumed:continue
                         cs={x['store'] for x in worker_db.cx.execute("SELECT store FROM offers WHERE book_id=?",(c['id'],))}
-                        score=title_similarity(b['title'],c['title'])
-                        if score>=.965 and bs.isdisjoint(cs):
+                        # Amazon often appends an imprint/publisher in a final parenthetical.
+                        # Use the Amazon offer title itself when available, strip only a likely
+                        # trailing publisher tag, require compatible volume hints, and use a
+                        # stricter threshold than ordinary cross-store reconciliation.
+                        bt=b['title']; ct=c['title']
+                        if "Amazon" in bs:
+                            ar=worker_db.cx.execute("SELECT title FROM offers WHERE book_id=? AND store='Amazon'",(b['id'],)).fetchone()
+                            if ar:bt=ar['title']
+                        if "Amazon" in cs:
+                            ar=worker_db.cx.execute("SELECT title FROM offers WHERE book_id=? AND store='Amazon'",(c['id'],)).fetchone()
+                            if ar:ct=ar['title']
+                        score=cross_store_title_similarity(bt,bs,ct,cs)
+                        threshold=.985 if (("Amazon" in bs) ^ ("Amazon" in cs)) else .965
+                        if score>=threshold and bs.isdisjoint(cs):
                             urls1=[f"{x['store']}: {x['url']}" for x in worker_db.cx.execute("SELECT store,url FROM offers WHERE book_id=?",(b['id'],))]
                             urls2=[f"{x['store']}: {x['url']}" for x in worker_db.cx.execute("SELECT store,url FROM offers WHERE book_id=?",(c['id'],))]
                             if worker_db.merge_books(b['id'],c['id']):
@@ -1973,9 +1985,19 @@ class App(tk.Tk):
                     b=worker_db.cx.execute("SELECT * FROM books WHERE id=?",(book_id,)).fetchone()
                     if not b:continue
                     existing={r['store']:r for r in worker_db.cx.execute("SELECT * FROM offers WHERE book_id=?",(book_id,))}
-                    source=next(iter(existing.values()),None); qtitle=source['title'] if source else b['title']; qauthor=(source['author'] if source and source['author'] else b['author']) or ''
-                    for store,p in self.providers.items():
+                    # Prefer a non-Amazon title as the search anchor. If this is an
+                    # Amazon-only import, remove only its likely trailing publisher tag.
+                    source=next((existing[s] for s in SEARCH_STORES if s in existing),None)
+                    if source is None:source=existing.get("Amazon") or next(iter(existing.values()),None)
+                    qtitle=source['title'] if source else b['title']
+                    if source and source['store']=="Amazon":qtitle=amazon_title_for_match(qtitle)
+                    qauthor=(source['author'] if source and source['author'] else b['author']) or ''
+                    # Amazon discovery/search stays disabled. Imported Amazon-only books
+                    # may search the other three stores, but we never search Amazon.
+                    for store in SEARCH_STORES:
                         if store not in enabled_stores or store in existing:continue
+                        p=self.providers.get(store)
+                        if not p:continue
                         try:
                             r=p.best(qtitle,qauthor); checked+=1
                             if r:
