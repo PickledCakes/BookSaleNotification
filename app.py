@@ -47,8 +47,8 @@ JA_UI={
     "Settings":"設定","Check for Updates":"アップデート確認","Recently Deleted":"最近削除した項目",
     "Backup / Share":"バックアップ / 共有","Import HTML…":"HTMLを読み込む…",
     "Add from URL…":"URLから追加…","Import HTML folder…":"3ストアHTMLフォルダを読み込む…",
-    "BookLive + BOOK☆WALKER + DMM live search • Amazon HTML import/direct refresh only":
-        "BookLive + BOOK☆WALKER + DMM 対応 • Amazon は現在無効",
+    "BookLive + BOOK☆WALKER + DMM live search • Amazon direct URL/HTML import + refresh (search disabled)":
+        "BookLive + BOOK☆WALKER + DMM は検索対応 • Amazon はURL/HTML追加・更新対応（検索は無効）",
     "Search:":"検索:","Delete":"削除","History":"履歴","Mark purchased":"購入済みにする",
     "Edit store URLs":"ストアURLを編集","Find missing matches":"未登録ストアを検索","Update prices":"価格を更新",
     "Book":"書籍","Lowest cash price":"現金最安値","Matched":"一致数","Cover":"表紙",
@@ -79,11 +79,11 @@ JA_UI={
     "Open":"開く","Save changes":"変更を保存","Invalid store URL":"無効なストアURL",
     "Add book from store URL":"ストアURLから書籍を追加",
     "Add from BookLive / BOOK☆WALKER / DMM / Amazon URL":"BookLive / BOOK☆WALKER / DMM / Amazon のURLから追加",
-    "Paste one product URL. The app will fetch that exact product, then search the other two stores and fetch their product pages before adding anything to the list.":
-        "商品URLを1つ貼り付けてください。その商品を取得後、残り2ストアも検索し、商品ページを取得してからリストに追加します。",
-    "Fetch all stores and add":"3ストアを確認して追加","Cancel":"キャンセル",
+    "Paste one product URL. Amazon links are reduced to the clean /dp/ASIN form automatically. Amazon itself is not searched, but an Amazon URL can be used as the source to search the other three stores.":
+        "商品URLを1つ貼り付けてください。AmazonのURLは自動的に /dp/ASIN 形式へ短縮します。Amazon自体の検索は行いませんが、Amazon URLを元に他の3ストアを検索できます。",
+    "Fetch all stores and add":"ストアを確認して追加","Cancel":"キャンセル",
     "Paste a valid BookLive, BOOK☆WALKER, DMM Books or Amazon.co.jp product URL.":
-        "有効なBookLive、BOOK☆WALKER、またはDMM Booksの商品URLを貼り付けてください。",
+        "有効なBookLive、BOOK☆WALKER、DMM Books、またはAmazon.co.jpの商品URLを貼り付けてください。",
     "Import wishlist HTML":"ウィッシュリストHTMLを読み込む",
     "Choose folder containing saved wishlist/list HTML files":
         "保存したウィッシュリスト / リストHTMLが入ったフォルダを選択",
@@ -571,7 +571,7 @@ class DB:
         self.cx.commit()
 
     def offer_identity(self, offer):
-        return (offer.store, offer.store_id or "", canonical_url(offer.url))
+        return (offer.store, offer.store_id or "", canonical_store_url(offer.store,offer.url))
 
     def import_offer(self, offer, list_id=1):
         """Wishlist import: same-store identity only. Never fuzzy-merge titles."""
@@ -623,7 +623,7 @@ class DB:
         self.cx.execute("INSERT OR IGNORE INTO list_books(list_id,book_id) VALUES(?,?)",(list_id,bid))
 
         for o in offers:
-            url=canonical_url(o.url)
+            url=canonical_store_url(o.store,o.url)
             exact=self.cx.execute(
                 "SELECT id,book_id FROM offers WHERE store=? AND ((store_id!='' AND store_id=?) OR url=?)",
                 (o.store,o.store_id or "",url)
@@ -679,19 +679,20 @@ class DB:
     def update_offer_for_book(self, book_id, store, offer):
         """Refresh one already-associated store offer without canonical rematching."""
         row=self.cx.execute("SELECT * FROM offers WHERE book_id=? AND store=?",(book_id,store)).fetchone()
+        normalized_url=canonical_store_url(store,offer.url)
         if not row:
             # Defensive fallback for a known book/store slot: create it on THIS book only.
             cur=self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,price,list_price,
                 reward_pct,reward_value,tax_ex_price,author,flags,locked,observed_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,CURRENT_TIMESTAMP)""",
-                (book_id,store,offer.store_id,offer.title,offer.url,offer.price,offer.list_price,
+                (book_id,store,offer.store_id,offer.title,normalized_url,offer.price,offer.list_price,
                  offer.reward_pct,offer.reward_value,offer.tax_ex_price,offer.author,offer.flags))
             oid=cur.lastrowid
         else:
             oid=row["id"]
             # Manual/locked URLs remain authoritative. For unlocked offers the provider's
             # canonical URL/ID may be refreshed, but the offer stays attached to this book.
-            new_url=row["url"] if row["locked"] else (offer.url or row["url"])
+            new_url=row["url"] if row["locked"] else (normalized_url or row["url"])
             new_store_id=row["store_id"] if row["locked"] and row["store_id"] else (offer.store_id or row["store_id"])
             self.cx.execute("""UPDATE offers SET store_id=?,title=?,url=?,price=?,list_price=?,
                 reward_pct=?,reward_value=?,tax_ex_price=?,author=?,flags=?,observed_at=CURRENT_TIMESTAMP
@@ -881,7 +882,7 @@ class App(tk.Tk):
         ttk.Button(top,text="Import HTML folder…",command=self.import_folder).pack(side="right",padx=4)
 
         phase=ttk.Frame(self,padding=(10,0,10,7)); phase.pack(fill="x")
-        ttk.Label(phase,text="BookLive + BOOK☆WALKER + DMM live search • Amazon HTML import/direct refresh only",
+        ttk.Label(phase,text="BookLive + BOOK☆WALKER + DMM live search • Amazon direct URL/HTML import + refresh (search disabled)",
                   font=("Segoe UI",9,"bold")).pack(anchor="w")
         self.list_tabs=ttk.Notebook(self); self.list_tabs.pack(fill="x",padx=10,pady=(0,6))
         self.rebuild_list_tabs()
@@ -1363,7 +1364,7 @@ class App(tk.Tk):
         source_store=self._store_from_product_url(url)
         if not source_store:
             messagebox.showerror("Invalid store URL",
-                "Paste a valid BookLive, BOOK☆WALKER or DMM Books product URL.")
+                "Paste a valid BookLive, BOOK☆WALKER, DMM Books or Amazon.co.jp product URL.")
             return
 
         url=canonical_store_url(source_store,url)
@@ -1381,14 +1382,15 @@ class App(tk.Tk):
                 found={source_store:primary}
                 self.log(f"[Manual add] Anchor title: {primary.title}")
 
-                # Explicit manual add always checks all three stores, regardless of the
-                # automatic-update enable/disable toggles.
+                # Amazon search itself remains disabled. When Amazon is the supplied
+                # source, normalize its title before searching the other three stores.
+                search_title=amazon_title_for_match(primary.title) if source_store=="Amazon" else primary.title
                 for store in SEARCH_STORES:
                     if store==source_store: continue
                     self.after(0,lambda st=store:self.status.set(f"Searching {st}…"))
-                    self.log(f"[Manual add] Searching {store} for: {primary.title}")
+                    self.log(f"[Manual add] Searching {store} for: {search_title}")
                     try:
-                        result=self.providers[store].best(primary.title,primary.author)
+                        result=self.providers[store].best(search_title,primary.author)
                         if result:
                             found[store]=self._offer_from_live(result)
                             self.log(f"[Manual add] Matched {store}: {result.title} • {result.url}")
@@ -1419,7 +1421,8 @@ class App(tk.Tk):
 
             self.refresh()
             lines=[]
-            for store in STORES:
+            summary_stores=STORES if "Amazon" in found else SEARCH_STORES
+            for store in summary_stores:
                 o=found.get(store)
                 if not o:
                     lines.append(f"{store}: no confident match")
