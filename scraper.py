@@ -2,7 +2,7 @@ from __future__ import annotations
 import re, time, unicodedata, json
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
@@ -497,6 +497,90 @@ class DMM(Provider):
         html=self.c.get(url)
         return self._parse_product_html(html,url)
 
+class Amazon(Provider):
+    """Phase-1 Amazon support.
+
+    Search/discovery is intentionally disabled. Only a known amazon.co.jp Kindle
+    product URL that was imported from HTML may be refreshed directly.
+    """
+    store="Amazon"; base="https://www.amazon.co.jp"
+
+    def search(self,title,author=""):
+        self.c.logger("[Amazon] Search/discovery is disabled; HTML import + direct known-URL refresh only")
+        return []
+
+    def product(self,url):
+        u=urlparse(url)
+        host=(u.hostname or "").lower().rstrip(".")
+        m=re.search(r"/dp/([A-Z0-9]{10})(?:/|$)",u.path,re.I)
+        if not (host=="amazon.co.jp" or host.endswith(".amazon.co.jp")) or not m:
+            raise ValueError("Amazon refresh requires an amazon.co.jp /dp/<ASIN> product URL")
+        asin=m.group(1).upper()
+        canonical=f"{self.base}/dp/{asin}"
+        html=self.c.get(canonical)
+        soup=BeautifulSoup(html,"html.parser")
+
+        title=""
+        n=soup.select_one("#productTitle") or soup.select_one("#ebooksProductTitle")
+        if n:title=space(n.get_text(" ",strip=True))
+        if not title:
+            og=soup.select_one('meta[property="og:title"]')
+            if og:title=space(og.get("content",""))
+        title=re.sub(r"\s*[:|｜-]\s*Amazon\.co\.jp.*$","",title,flags=re.I)
+        title=re.sub(r"\s*[（(]\s*Kindle(?:版| Edition)\s*[）)]\s*$","",title,flags=re.I)
+
+        price=None
+        # Prefer selectors tied to the Kindle/digital buy box. Generic fallbacks are
+        # last because Amazon can show other formats on the same page.
+        for sel in (
+            "#kindle-price", "#kindle-price .a-offscreen",
+            "#buybox .a-price .a-offscreen",
+            "#newBuyBoxPrice", "#priceblock_ourprice",
+            ".a-price[data-a-color='price'] .a-offscreen",
+            ".a-price .a-offscreen",
+        ):
+            node=soup.select_one(sel)
+            if node:
+                price=money(node.get_text(" ",strip=True))
+                if price is not None:break
+
+        listp=None
+        for sel in ("#listPrice", ".basisPrice .a-offscreen", ".a-text-price .a-offscreen"):
+            node=soup.select_one(sel)
+            if node:
+                v=money(node.get_text(" ",strip=True))
+                if v is not None and (price is None or v>=price):
+                    listp=v; break
+
+        reward=None
+        # Keep Amazon points informational; the app's lowest-price calculation remains cash-only.
+        page_text=nfkc(soup.get_text(" ",strip=True))
+        for pat in (
+            r"(\d[\d,]*)\s*ポイント",
+            r"(\d[\d,]*)\s*pt(?:\s|$)",
+        ):
+            mm=re.search(pat,page_text,re.I)
+            if mm:
+                reward=int(mm.group(1).replace(",","")); break
+
+        cover=""
+        img=soup.select_one("#landingImage") or soup.select_one("#imgBlkFront")
+        if img:
+            cover=(img.get("data-old-hires") or img.get("data-a-dynamic-image") or img.get("src") or "").strip()
+            if cover.startswith("{"):
+                try:
+                    obj=json.loads(cover)
+                    if obj:cover=max(obj,key=lambda x:(obj[x][0] if isinstance(obj[x],list) and obj[x] else 0))
+                except Exception:cover=""
+        if not cover:
+            og=soup.select_one('meta[property="og:image"]')
+            if og:cover=(og.get("content") or "").strip()
+
+        self.c.logger(f"[Amazon] Direct product values: cash={price}, points={reward}, ASIN={asin}")
+        return Result(self.store,title,canonical,asin,price=price,list_price=listp,
+                      reward_value=reward,cover_url=cover)
+
+
 def providers(delay=1.25,logger=None):
     c=Client(delay=delay,logger=logger)
-    return {"BookLive":BookLive(c),"BOOK☆WALKER":BookWalker(c),"DMM":DMM(c)}
+    return {"BookLive":BookLive(c),"BOOK☆WALKER":BookWalker(c),"DMM":DMM(c),"Amazon":Amazon(c)}
