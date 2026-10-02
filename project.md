@@ -569,3 +569,11 @@ For 1.9:
 - Hover now finds the nearest visible graph point in screen pixels, fixing the single-data-point case and making interaction more forgiving generally.
 - History Data shows the persisted price-change events directly rather than repeated unchanged refresh observations.
 - Data table supports multi-select **Delete selected records** with confirmation and an automatic DB backup. Deletion removes only history rows, then redraws the graph/recalculates stats; current offers.price is untouched.
+
+### beta.6 — DMM current bookmark layout + tooltip bounds
+
+- Adds support for the current DMM Books **あとで買う** HTML layout, which now uses `ul.fn-bookmarkList > li.fn-listContainer` rather than the older bookmark table rows.
+- Keeps the legacy DMM table parser for older saved exports.
+- Current-layout parsing reads the canonical product URL, title, cash price, author, cover URL, DMM series/item identity, visible campaign reward percentage, and relevant labels.
+- Verified against the supplied 120-item DMM saved page: all 120 wishlist items are parsed.
+- Price History hover tooltips now choose left/right and up/down placement based on the hovered point's screen position, reducing clipping at the right/top graph edges.
