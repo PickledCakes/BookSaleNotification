@@ -46,8 +46,8 @@ JA_UI={
     "Book Sale Notification":"Book Sale Notification",
     "Settings":"設定","Check for Updates":"アップデート確認","Recently Deleted":"最近削除した項目",
     "Backup / Share":"バックアップ / 共有","Import HTML…":"HTMLを読み込む…",
-    "Add from URL…":"URLから追加…","Import 3-store folder…":"3ストアHTMLフォルダを読み込む…",
-    "BookLive + BOOK☆WALKER + DMM active • Amazon intentionally disabled":
+    "Add from URL…":"URLから追加…","Import HTML folder…":"3ストアHTMLフォルダを読み込む…",
+    "BookLive + BOOK☆WALKER + DMM live search • Amazon HTML import/direct refresh only":
         "BookLive + BOOK☆WALKER + DMM 対応 • Amazon は現在無効",
     "Search:":"検索:","Delete":"削除","History":"履歴","Mark purchased":"購入済みにする",
     "Edit store URLs":"ストアURLを編集","Find missing matches":"未登録ストアを検索","Update prices":"価格を更新",
@@ -112,14 +112,15 @@ JA_UI={
         "有効なウィッシュリスト内にCalibre識別子と完全一致する書籍がありません。",
     "Notification rule":"通知ルール","Any sale":"セールなら通知","Lowest recorded price":"記録上の最安値",
     "Good deal":"お得な価格","Good-deal threshold (> %):":"お得判定の割引率 (> %):",
-    "Show direct DMM points / BOOK☆WALKER coins in store price columns":
-        "DMMポイント / BOOK☆WALKERコインを価格欄に表示",
+    "Show direct DMM points / BOOK☆WALKER coins / Amazon points in store price columns":
+        "DMMポイント / BOOK☆WALKERコイン / Amazonポイントを価格欄に表示",
     "BOOK☆WALKER overseas tax mode (show stored tax-exclusive price when known)":
         "BOOK☆WALKER海外税モード（取得済みの税抜価格があれば表示）",
     "Cover display":"表紙表示","Show book covers":"表紙を表示","Cover size:":"表紙サイズ:",
     "Small":"小","Medium":"中","Large":"大","Stores":"ストア",
     "Disabled stores are hidden and skipped by matching, updates and cover fetching.":
         "無効にしたストアは非表示になり、照合・更新・表紙取得を行いません。",
+    "Amazon (HTML import + direct price refresh only)":"Amazon（HTML読込・直接価格更新のみ）",
     "Automatic update interval (hours):":"自動更新間隔（時間）:",
     "Minimum delay between store requests (seconds):":"ストアへの最低アクセス間隔（秒）:",
     "Appearance:":"外観:","Recently Deleted retention (days):":"最近削除した項目の保持日数:",
@@ -875,10 +876,10 @@ class App(tk.Tk):
         ttk.Button(bar,text="Find missing matches",command=self.find_missing_matches).pack(side="right",padx=4)
         ttk.Button(bar,text="Update prices",command=self.update_prices).pack(side="right",padx=4)
 
-        cols=("title","booklive","bookwalker","dmm","lowest","stores")
+        cols=("title","booklive","bookwalker","dmm","amazon","lowest","stores")
         headings={"title":"Book","booklive":"BookLive","bookwalker":"BOOK☆WALKER",
-                  "dmm":"DMM","lowest":"Lowest cash price","stores":"Matched"}
-        widths={"title":590,"booklive":125,"bookwalker":145,"dmm":125,"lowest":155,"stores":75}
+                  "dmm":"DMM","amazon":"Amazon","lowest":"Lowest cash price","stores":"Matched"}
+        widths={"title":500,"booklive":115,"bookwalker":135,"dmm":115,"amazon":115,"lowest":150,"stores":70}
 
         # Main table and live activity console.  Create the final Treeview directly
         # in table_frame so the scrollbar can never retain a callback to a destroyed widget.
@@ -1816,6 +1817,7 @@ class App(tk.Tk):
         store_booklive=tk.BooleanVar(value=self.db.get_setting("store_booklive_enabled","1")=="1")
         store_bookwalker=tk.BooleanVar(value=self.db.get_setting("store_bookwalker_enabled","1")=="1")
         store_dmm=tk.BooleanVar(value=self.db.get_setting("store_dmm_enabled","1")=="1")
+        store_amazon=tk.BooleanVar(value=self.db.get_setting("store_amazon_enabled","1")=="1")
         interval=tk.StringVar(value=self.db.get_setting("update_interval_hours","6"))
         reqdelay=tk.StringVar(value=self.db.get_setting("request_delay_seconds","1.25"))
         appearance=tk.StringVar(value=self.db.get_setting("appearance","system"))
@@ -1830,7 +1832,7 @@ class App(tk.Tk):
             self.db.set_setting("include_direct_rewards","1" if rewards.get() else "0")
             self.db.set_setting("bw_overseas_tax","1" if bw_tax.get() else "0")
             self.refresh()
-        ttk.Checkbutton(f,text="Show direct DMM points / BOOK☆WALKER coins in store price columns",
+        ttk.Checkbutton(f,text="Show direct DMM points / BOOK☆WALKER coins / Amazon points in store price columns",
                         variable=rewards,command=apply_price_view).pack(anchor="w",pady=5)
         ttk.Checkbutton(f,text="BOOK☆WALKER overseas tax mode (show stored tax-exclusive price when known)",
                         variable=bw_tax,command=apply_price_view).pack(anchor="w",pady=5)
@@ -1855,10 +1857,12 @@ class App(tk.Tk):
             self.db.set_setting("store_booklive_enabled","1" if store_booklive.get() else "0")
             self.db.set_setting("store_bookwalker_enabled","1" if store_bookwalker.get() else "0")
             self.db.set_setting("store_dmm_enabled","1" if store_dmm.get() else "0")
+            self.db.set_setting("store_amazon_enabled","1" if store_amazon.get() else "0")
             self.apply_store_columns(); self.refresh()
         ttk.Checkbutton(f,text="BookLive",variable=store_booklive,command=apply_store_settings).pack(anchor="w")
         ttk.Checkbutton(f,text="BOOK☆WALKER",variable=store_bookwalker,command=apply_store_settings).pack(anchor="w")
         ttk.Checkbutton(f,text="DMM",variable=store_dmm,command=apply_store_settings).pack(anchor="w")
+        ttk.Checkbutton(f,text="Amazon (HTML import + direct price refresh only)",variable=store_amazon,command=apply_store_settings).pack(anchor="w")
         row2=ttk.Frame(f); row2.pack(fill="x",pady=8)
         ttk.Label(row2,text="Automatic update interval (hours):").pack(side="left")
         ttk.Combobox(row2,textvariable=interval,values=("3","6","12","24"),width=6,state="readonly").pack(side="left",padx=6)
@@ -1882,6 +1886,7 @@ class App(tk.Tk):
             self.db.set_setting("store_booklive_enabled","1" if store_booklive.get() else "0")
             self.db.set_setting("store_bookwalker_enabled","1" if store_bookwalker.get() else "0")
             self.db.set_setting("store_dmm_enabled","1" if store_dmm.get() else "0")
+            self.db.set_setting("store_amazon_enabled","1" if store_amazon.get() else "0")
             self.db.set_setting("update_interval_hours",interval.get())
             self.db.set_setting("request_delay_seconds",reqdelay.get())
             chosen_appearance=appearance_display.get(); appearance.set({"システム":"system","ライト":"light","ダーク":"dark"}.get(chosen_appearance,chosen_appearance))
