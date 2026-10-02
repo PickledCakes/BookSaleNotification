@@ -23,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.8.3"
-APP_VERSION = "1.8.3"
+APP_NAME = "Book Sale Notification 1.8.4"
+APP_VERSION = "1.8.4"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -398,6 +398,37 @@ def parse_amazon(soup):
         ma=re.search(r"\bby\s+(.+?)\s+[（(]Kindle Edition[）)]",text,re.I)
         if ma:author=ma.group(1).strip()
         out.append(Offer("Amazon",title,url,price,author=author,store_id=asin,flags="amazon_html"))
+
+    # 電子書籍の司書さん table/list view (SO=14 / 一覧表).
+    # This layout has title + author + Amazon ASIN, but normally no price/cover.
+    # Import the identity/metadata now; Update Prices can fill Amazon values later.
+    for tr in soup.select("table.result2 tr"):
+        a=tr.select_one('a[href*="amazon.co.jp/dp/"]')
+        if not a:continue
+        href=a.get("href","")
+        mid=re.search(r"/dp/([A-Z0-9]{10})",href,re.I)
+        if not mid:continue
+        asin=mid.group(1).upper()
+        title=a.get_text(" ",strip=True)
+        if not title:continue
+
+        author=""
+        cells=tr.find_all("td",recursive=False)
+        if len(cells)>=4:
+            names=[x.get_text(" ",strip=True) for x in cells[3].find_all("a")
+                   if x.get_text(" ",strip=True)]
+            if names:
+                author=" / ".join(dict.fromkeys(names))
+            else:
+                author=cells[3].get_text(" ",strip=True)
+
+        cover=""
+        img=tr.select_one('img[data-img]') or tr.select_one('img[src*="media-amazon.com"]')
+        if img:
+            cover=(img.get("data-img") or img.get("src") or "").strip()
+
+        out.append(Offer("Amazon",title,f"https://www.amazon.co.jp/dp/{asin}",None,
+                         author=author,cover_url=cover,store_id=asin,flags="xpg_html_table"))
 
     # 電子書籍の司書さん (k.xpg.jp) saved list HTML.
     # The visible top price is often cash minus points, e.g. ￥327 with
