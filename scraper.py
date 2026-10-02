@@ -501,12 +501,12 @@ class Amazon(Provider):
     """Phase-1 Amazon support.
 
     Search/discovery is intentionally disabled. Only a known amazon.co.jp Kindle
-    product URL that was imported from HTML may be refreshed directly.
+    product URL from HTML import or Add from URL may be refreshed directly.
     """
     store="Amazon"; base="https://www.amazon.co.jp"
 
     def search(self,title,author=""):
-        self.c.logger("[Amazon] Search/discovery is disabled; HTML import + direct known-URL refresh only")
+        self.c.logger("[Amazon] Search/discovery is disabled; direct known-URL refresh only")
         return []
 
     def product(self,url):
