@@ -23,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.8.1"
-APP_VERSION = "1.8.1"
+APP_NAME = "Book Sale Notification 1.8.2"
+APP_VERSION = "1.8.2"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -723,7 +723,7 @@ class DB:
         return out
 
     def calibre_identifier_index(self):
-        """Exact supported Calibre identifier -> canonical book mapping."""
+        """Exact supported Calibre identifier -> canonical book mapping (bl/bw/dmm/amazon_jp)."""
         idx={}
         rows=self.cx.execute("SELECT o.book_id,o.store,o.store_id,o.url,b.title,b.status FROM offers o JOIN books b ON b.id=o.book_id").fetchall()
         for r in rows:
@@ -749,6 +749,14 @@ class DB:
                     m=re.search(r'/product/\d+/([^/?#]+)/?',url,re.I)
                     if m and m.group(1).lower()!="latest": raw=m.group(1)
                 if raw: keys.append(("dmm:"+raw).lower())
+            elif r["store"]=="Amazon":
+                raw=sid
+                if raw.lower().startswith("amazon_jp:"): raw=raw.split(":",1)[1]
+                if not raw:
+                    m=re.search(r'/dp/([A-Z0-9]{10})(?:/|$)',url,re.I)
+                    if m: raw=m.group(1)
+                if raw and re.fullmatch(r'[A-Z0-9]{10}',raw,re.I):
+                    keys.append(("amazon_jp:"+raw).lower())
             for key in keys:
                 idx[key]={"book_id":r["book_id"],"title":r["title"],"status":r["status"],"store":r["store"]}
         return idx
@@ -1671,7 +1679,7 @@ class App(tk.Tk):
                         if ":" not in part: continue
                         kind,value=part.split(":",1)
                         kind=kind.strip().lower(); value=value.strip()
-                        if kind in ("bl","bw","dmm") and value:
+                        if kind in ("bl","bw","dmm","amazon_jp") and value:
                             key=f"{kind}:{value}".lower()
                             ids.append(key); supported.add(key)
                     parsed.append((rowno,raw,ids))
@@ -1696,14 +1704,14 @@ class App(tk.Tk):
         preview=[
             "CALIBRE PURCHASE SYNC — PREVIEW","",
             f"CSV rows scanned: {len(parsed)}",
-            f"Supported unique identifiers (bl/bw/dmm): {len(supported)}",
+            f"Supported unique identifiers (bl/bw/dmm/amazon_jp): {len(supported)}",
             f"Active books to archive: {len(matches)}",
             f"Already archived exact matches: {len(already)}",
             f"Supported identifiers not present in wishlist: {len(unmatched)}",
             "",
             "MATCHING POLICY",
-            "Exact identifiers only: bl:, bw:, dmm:",
-            "Titles/authors/series/ISBN/ASIN are NOT used as fallback matches.",
+            "Exact identifiers only: bl:, bw:, dmm:, amazon_jp:",
+            "Titles/authors/series/ISBN are NOT used as fallback matches. Amazon matches use exact amazon_jp:ASIN identifiers only.",
             ""
         ]
         if matches:
