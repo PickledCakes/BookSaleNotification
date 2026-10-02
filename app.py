@@ -23,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.8.5"
-APP_VERSION = "1.8.5"
+APP_NAME = "Book Sale Notification 1.8.6"
+APP_VERSION = "1.8.6"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -955,6 +955,8 @@ class App(tk.Tk):
         self.refresh()
         if self.db.get_setting("main_window_state","normal")=="zoomed":
             self.after_idle(lambda:self.state("zoomed"))
+        if self.db.get_setting("check_updates_on_startup","1")=="1":
+            self.after(1800,lambda:self.check_for_updates(silent=True,automatic=True))
 
     def _restore_window_geometry(self):
         saved=self.db.get_setting("main_window_geometry",MAIN_DEFAULT_GEOMETRY)
@@ -2131,6 +2133,7 @@ class App(tk.Tk):
         reqdelay=tk.StringVar(value=self.db.get_setting("request_delay_seconds","1.25"))
         appearance=tk.StringVar(value=self.db.get_setting("appearance","system"))
         retention=tk.StringVar(value=self.db.get_setting("trash_retention_days","14"))
+        check_updates=tk.BooleanVar(value=self.db.get_setting("check_updates_on_startup","1")=="1")
         ttk.Label(f,text="Notification rule",font=("Segoe UI",10,"bold")).pack(anchor="w")
         for text,val in [("Any sale","any_sale"),("Lowest recorded price","historical_low"),("Good deal","good_deal")]:
             ttk.Radiobutton(f,text=text,variable=notify,value=val).pack(anchor="w")
@@ -2178,6 +2181,8 @@ class App(tk.Tk):
         row3=ttk.Frame(f); row3.pack(fill="x",pady=5)
         ttk.Label(row3,text="Minimum delay between store requests (seconds):").pack(side="left")
         ttk.Entry(row3,textvariable=reqdelay,width=7).pack(side="left",padx=6)
+        ttk.Checkbutton(f,text="Check for new versions on startup (never installs automatically)",
+                        variable=check_updates).pack(anchor="w",pady=(5,2))
         ttk.Separator(f).pack(fill="x",pady=(8,6))
         ar=ttk.Frame(f); ar.pack(fill="x"); ttk.Label(ar,text="Appearance:").pack(side="left")
         appearance_values=("system","light","dark") if UI_LANG!="ja" else ("システム","ライト","ダーク")
@@ -2198,6 +2203,7 @@ class App(tk.Tk):
             self.db.set_setting("store_amazon_enabled","1" if store_amazon.get() else "0")
             self.db.set_setting("update_interval_hours",interval.get())
             self.db.set_setting("request_delay_seconds",reqdelay.get())
+            self.db.set_setting("check_updates_on_startup","1" if check_updates.get() else "0")
             chosen_appearance=appearance_display.get(); appearance.set({"システム":"system","ライト":"light","ダーク":"dark"}.get(chosen_appearance,chosen_appearance))
             self.db.set_setting("appearance",appearance.get()); self.db.set_setting("trash_retention_days",retention.get())
             self.apply_theme()
@@ -2397,7 +2403,7 @@ class App(tk.Tk):
         nums=re.findall(r"\d+",str(value or ""))
         return tuple(int(x) for x in nums[:3]) if nums else (0,)
 
-    def check_for_updates(self, silent=False):
+    def check_for_updates(self, silent=False, automatic=False):
         if not GITHUB_OWNER or not GITHUB_REPO:
             if not silent: messagebox.showinfo("Updates","GitHub updates are not configured in this build yet.")
             return
@@ -2410,21 +2416,49 @@ class App(tk.Tk):
                     release=json.loads(r.read().decode("utf-8"))
                 latest=str(release.get("tag_name","")).lstrip("vV")
                 if self._version_tuple(latest)<=self._version_tuple(APP_VERSION):
-                    if not silent:self.after(0,lambda:messagebox.showinfo("Updates",f"{APP_NAME} is up to date."))
+                    if not silent:
+                        self.after(0,lambda latest=latest:messagebox.showinfo(
+                            "Updates",f"You're already using the latest version ({latest or APP_VERSION})."))
                     return
+
                 asset=next((x for x in (release.get("assets") or [])
                             if x.get("name","").startswith(UPDATE_ASSET_PREFIX) and x.get("name","").endswith(".zip")),None)
-                if not asset: raise RuntimeError("Latest release has no Windows update ZIP.")
+                if not asset:
+                    # A GitHub release can appear before the Windows build finishes uploading.
+                    # This is normal; don't present it as a scary runtime error.
+                    if not silent:
+                        self.after(0,lambda latest=latest:messagebox.showinfo(
+                            "Update not ready yet",
+                            f"Version {latest} has been published, but the Windows build is still being prepared.\n\n"
+                            "Please try again in a few minutes."))
+                    return
+
+                if automatic:
+                    today=datetime.now().date().isoformat()
+                    last_ver=self.db.get_setting("last_update_reminder_version","")
+                    last_day=self.db.get_setting("last_update_reminder_date","")
+                    if last_ver==latest and last_day==today:
+                        return
+                    self.db.set_setting("last_update_reminder_version",latest)
+                    self.db.set_setting("last_update_reminder_date",today)
+
                 body=(release.get("body") or "").strip()
                 def prompt():
                     msg=f"Version {latest} is available.\n\n"
-                    if body: msg+=body[:1600]+"\n\n"
-                    msg+="Download and install it now? The application will restart automatically."
-                    if messagebox.askyesno("Update available",msg): self._download_and_install_update(latest,asset)
+                    if body and not automatic:
+                        msg+=body[:1600]+"\n\n"
+                    msg+="Would you like to download and install it now?\n\nNothing is installed unless you choose Yes."
+                    if messagebox.askyesno("Update available",msg):
+                        self._download_and_install_update(latest,asset)
                 self.after(0,prompt)
             except Exception as e:
-                if not silent:self.after(0,lambda e=e:messagebox.showerror("Update check failed",f"{type(e).__name__}: {e}"))
-            finally:self.after(0,lambda:self.status.set("Ready"))
+                if not silent:
+                    self.after(0,lambda e=e:messagebox.showerror(
+                        "Update check failed",
+                        "Could not check for updates right now. Please try again later.\n\n"
+                        f"{type(e).__name__}: {e}"))
+            finally:
+                self.after(0,lambda:self.status.set("Ready"))
         self._run_background(work)
 
     def _download_and_install_update(self, version, asset):
