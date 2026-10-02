@@ -925,13 +925,15 @@ class DB:
         self._compact_price_history_once()
 
     def _history_key(self,row):
-        return (row["price"],row["list_price"],row["reward_pct"],row["reward_value"])
+        # Price History tracks cash/list-price changes. Reward-only changes do not
+        # create another history event; the current offer still retains fresh rewards.
+        return (row["price"],row["list_price"])
 
     def _record_history_if_changed(self,offer_id,price,list_price,reward_pct,reward_value,provenance="local"):
         """Store only meaningful changes; offers.observed_at still records every successful check."""
         last=self.cx.execute("""SELECT price,list_price,reward_pct,reward_value
             FROM price_history WHERE offer_id=? ORDER BY observed_at DESC,id DESC LIMIT 1""",(offer_id,)).fetchone()
-        new_key=(price,list_price,reward_pct,reward_value)
+        new_key=(price,list_price)
         if last is not None and self._history_key(last)==new_key:
             return False
         self.cx.execute("""INSERT INTO price_history
@@ -2549,13 +2551,16 @@ class App(tk.Tk):
         w.minsize(900,620)
 
         enabled=self.enabled_stores()
-        all_rows=[dict(r) for r in self.db.history_for_book(bid) if r["store"] in enabled]
-        for r in all_rows:
-            try:r["_dt"]=datetime.fromisoformat(str(r["observed_at"]).replace("Z","+00:00")).replace(tzinfo=None)
-            except Exception:
-                try:r["_dt"]=datetime.strptime(str(r["observed_at"])[:19],"%Y-%m-%d %H:%M:%S")
-                except Exception:r["_dt"]=datetime.now()
-        all_rows.sort(key=lambda r:r["_dt"])
+        def load_history_rows():
+            rows=[dict(r) for r in self.db.history_for_book(bid) if r["store"] in enabled]
+            for r in rows:
+                try:r["_dt"]=datetime.fromisoformat(str(r["observed_at"]).replace("Z","+00:00")).replace(tzinfo=None)
+                except Exception:
+                    try:r["_dt"]=datetime.strptime(str(r["observed_at"])[:19],"%Y-%m-%d %H:%M:%S")
+                    except Exception:r["_dt"]=datetime.now()
+            rows.sort(key=lambda r:r["_dt"])
+            return rows
+        all_rows=load_history_rows()
         offer_now={r["store"]:dict(r) for r in self.db.cx.execute(
             "SELECT store,price,list_price FROM offers WHERE book_id=?",(bid,)).fetchall() if r["store"] in enabled}
 
@@ -2593,7 +2598,6 @@ class App(tk.Tk):
         summary.pack(fill="x")
 
         data_controls=ttk.Frame(data_tab,padding=(4,4)); data_controls.pack(fill="x")
-        changes_only=tk.BooleanVar(value=True)
         data_cols=("date","store","price","list","reward","source")
         data_tree=ttk.Treeview(data_tab,columns=data_cols,show="headings")
         for col,label,width in (("date","Observed",175),("store","Store",140),("price","Cash price",105),
@@ -2629,9 +2633,9 @@ class App(tk.Tk):
             if before:after.insert(0,before[-1])
             return after
 
-        hover={"artists":[],"annotation":None}
+        hover={"points":[],"annotation":None}
         def render_graph():
-            ax.clear(); hover["artists"]=[]
+            ax.clear(); hover["points"]=[]
             mode=self.db.get_setting("appearance","system")
             dark=mode=="dark"
             fig.patch.set_facecolor("#121212" if dark else "white")
@@ -2666,8 +2670,9 @@ class App(tk.Tk):
                 if not store_vars[store].get() or not price_pts:continue
                 xs=[p["_dt"] for p in price_pts]; ys=[p["price"] for p in price_pts]
                 line,=ax.step(xs,ys,where="post",label=store,linewidth=1.8)
-                scatter=ax.scatter(xs,ys,s=22,color=line.get_color(),zorder=3,picker=6)
-                hover["artists"].append((scatter,store,price_pts))
+                ax.scatter(xs,ys,s=26,color=line.get_color(),zorder=3)
+                for p in price_pts:
+                    hover["points"].append((store,p))
                 visible_values.extend(ys); plotted=True
 
                 if show_list.get():
@@ -2692,34 +2697,50 @@ class App(tk.Tk):
             if plotted:
                 leg=ax.legend(loc="best",fontsize=8)
                 if leg:
+                    legend_bg="#242424" if dark else "white"
+                    legend_edge="#666666" if dark else "#bbbbbb"
                     for text_item in leg.get_texts():text_item.set_color(fg)
-                    leg.get_frame().set_alpha(.85)
+                    frame=leg.get_frame()
+                    frame.set_facecolor(legend_bg); frame.set_edgecolor(legend_edge); frame.set_alpha(.96)
             else:
                 ax.text(.5,.5,"No visible price history for this range.",ha="center",va="center",
                         transform=ax.transAxes,color=fg)
+            tip_bg="#242424" if dark else "white"
+            tip_fg="#f2f2f2" if dark else "#222222"
             hover["annotation"]=ax.annotate("",xy=(0,0),xytext=(12,12),textcoords="offset points",
-                bbox=dict(boxstyle="round",fc="white",alpha=.95),arrowprops=dict(arrowstyle="->"))
+                color=tip_fg,bbox=dict(boxstyle="round",fc=tip_bg,ec=grid,alpha=.97),
+                arrowprops=dict(arrowstyle="->",color=grid))
             hover["annotation"].set_visible(False)
             fig.autofmt_xdate(); fig.tight_layout()
             canvas.draw_idle()
 
         def hover_move(event):
             ann=hover.get("annotation")
-            if ann is None or event.inaxes is not ax:return
-            for artist,store,pts in hover["artists"]:
-                contains,info=artist.contains(event)
-                if contains and info.get("ind"):
-                    idx=int(info["ind"][0]); p=pts[idx]
-                    price=p.get("price"); previous=p.get("_previous_price"); regular=p.get("list_price")
-                    lines=[store,p["_dt"].strftime("%Y-%m-%d %H:%M"),f"¥{price:,}" if price is not None else "Price unavailable"]
-                    if previous is not None and price is not None and previous!=price:
-                        lines.append(f"Was ¥{previous:,}")
-                    ref=regular if regular is not None and price is not None and regular>price else previous
-                    if ref is not None and price is not None and ref>price:
-                        lines.append(f"{(ref-price)*100/ref:.0f}% off")
-                    ann.xy=(mdates.date2num(p["_dt"]),price)
-                    ann.set_text("\n".join(lines)); ann.set_visible(True)
-                    canvas.draw_idle(); return
+            if ann is None:return
+            if event.inaxes is not ax or event.x is None or event.y is None:
+                if ann.get_visible():
+                    ann.set_visible(False); canvas.draw_idle()
+                return
+            nearest=None; nearest_dist=13.0
+            for store,p in hover["points"]:
+                price=p.get("price")
+                if price is None:continue
+                px,py=ax.transData.transform((mdates.date2num(p["_dt"]),price))
+                dist=((px-event.x)**2+(py-event.y)**2)**0.5
+                if dist<nearest_dist:
+                    nearest=(store,p); nearest_dist=dist
+            if nearest is not None:
+                store,p=nearest
+                price=p.get("price"); previous=p.get("_previous_price"); regular=p.get("list_price")
+                lines=[store,p["_dt"].strftime("%Y-%m-%d %H:%M"),f"¥{price:,}" if price is not None else "Price unavailable"]
+                if previous is not None and price is not None and previous!=price:
+                    lines.append(f"Was ¥{previous:,}")
+                ref=regular if regular is not None and price is not None and regular>price else previous
+                if ref is not None and price is not None and ref>price:
+                    lines.append(f"{(ref-price)*100/ref:.0f}% off")
+                ann.xy=(mdates.date2num(p["_dt"]),price)
+                ann.set_text("\n".join(lines)); ann.set_visible(True)
+                canvas.draw_idle(); return
             if ann.get_visible():
                 ann.set_visible(False); canvas.draw_idle()
 
@@ -2727,16 +2748,31 @@ class App(tk.Tk):
 
         def refresh_data():
             data_tree.delete(*data_tree.get_children())
-            for store in enabled:
-                source=collapsed(store) if changes_only.get() else [r for r in all_rows if r["store"]==store]
-                for r in reversed(source):
-                    reward=(f"{r['reward_pct']:g}% pt" if r.get("reward_pct") else
-                            f"{r['reward_value']} coin/pt" if r.get("reward_value") else "")
-                    data_tree.insert("","end",values=(
-                        r["_dt"].strftime("%Y-%m-%d %H:%M:%S"),store,
-                        f"¥{r['price']:,}" if r.get("price") is not None else "",
-                        f"¥{r['list_price']:,}" if r.get("list_price") is not None else "",
-                        reward,r.get("provenance","")))
+            for r in sorted(all_rows,key=lambda x:x["_dt"],reverse=True):
+                reward=(f"{r['reward_pct']:g}% pt" if r.get("reward_pct") else
+                        f"{r['reward_value']} coin/pt" if r.get("reward_value") else "")
+                data_tree.insert("","end",iid=str(r["id"]),values=(
+                    r["_dt"].strftime("%Y-%m-%d %H:%M:%S"),r["store"],
+                    f"¥{r['price']:,}" if r.get("price") is not None else "",
+                    f"¥{r['list_price']:,}" if r.get("list_price") is not None else "",
+                    reward,r.get("provenance","")))
+
+        def delete_history_selected():
+            selected=list(data_tree.selection())
+            if not selected:
+                messagebox.showinfo("Price history","Select one or more history records first.")
+                return
+            count=len(selected)
+            if not messagebox.askyesno("Delete history records",
+                f"Permanently delete {count} selected price-history record{'s' if count!=1 else ''}?\n\n"
+                "This removes only the selected historical observations. The current store price is not changed. "
+                "An automatic database backup will be created first."):
+                return
+            self.auto_backup("delete_price_history")
+            self.db.delete_history_ids([int(x) for x in selected])
+            all_rows[:]=load_history_rows()
+            refresh_data(); render_graph()
+            self.refresh()
 
         for label,value in ranges:
             ttk.Radiobutton(controls,text=label,variable=range_var,value=value,
@@ -2747,9 +2783,8 @@ class App(tk.Tk):
                             command=render_graph).pack(side="left",padx=(0,5))
         ttk.Checkbutton(controls,text="Show regular/list price",variable=show_list,
                         command=render_graph).pack(side="right")
-        ttk.Checkbutton(data_controls,text="Show price changes only",variable=changes_only,
-                        command=refresh_data).pack(side="left")
-        ttk.Label(data_controls,text="All saved observations remain in the database.").pack(side="left",padx=10)
+        ttk.Label(data_controls,text="Price-change events only. Repeated unchanged refreshes are not stored.").pack(side="left")
+        ttk.Button(data_controls,text="Delete selected records",command=delete_history_selected).pack(side="right")
 
         render_graph(); refresh_data()
 
