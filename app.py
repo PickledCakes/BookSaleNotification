@@ -325,6 +325,12 @@ JA_UI={
     "Opening BOOK☆WALKER sign-in…":"BOOK☆WALKERのログイン画面を開いています…",
     "BOOK☆WALKER connected":"BOOK☆WALKERに接続しました",
     "BOOK☆WALKER sign-in was not completed.":"BOOK☆WALKERへのログインが完了しませんでした。",
+    "BOOK☆WALKER connected. Future price updates will use the signed-in session for coin values.":
+        "BOOK☆WALKERに接続しました。今後の価格更新ではログイン中のアカウントのコイン数を取得します。",
+    "Your BOOK☆WALKER session has expired. Sign in again to continue receiving your account-specific coin amounts.":
+        "BOOK☆WALKERのセッションが期限切れです。アカウント固有のコイン数を取得するには、もう一度ログインしてください。",
+    "Sale notification test":"セール通知テスト",
+    "Test Book":"テスト書籍",
     "Check for new versions on startup (never installs automatically)":"起動時に新しいバージョンを確認する（自動インストールはしません）",
     "Use nightly / pre-release versions (test builds)":"ナイトリー / プレリリース版（テストビルド）を使用する",
     "Off = stable releases only. Test builds may contain unfinished fixes.":
@@ -2442,16 +2448,45 @@ class App(tk.Tk):
         suffix=("\n\n"+"\n".join(extra)) if extra else ""
         messagebox.showinfo("History imported",f"Merged {n} historical observations.{suffix}")
 
+    def _desktop_notification(self,title,message):
+        """Show the same desktop/tray notification path used for sale alerts."""
+        title=ui_tr(title); message=ui_tr(message)
+        try:
+            if self._ensure_tray_icon():
+                self._tray_icon.notify(message,title)
+                self.log(f"[Notification] {title}: {message}")
+                return True
+        except Exception as e:
+            self.log(f"[Notification] Tray notification failed: {type(e).__name__}: {e}")
+        messagebox.showinfo(title,message)
+        return False
+
+    def _test_sale_notification(self,rule=None,threshold_text=None):
+        rule=rule or self.db.get_setting("notification_rule","any_sale")
+        try: threshold=float(threshold_text if threshold_text is not None else self.db.get_setting("deal_threshold","20"))
+        except Exception: threshold=20.0
+        if UI_LANG=="ja":
+            if rule=="historical_low":
+                msg="テスト書籍が記録上の最安値になりました：BookLive で ¥396"
+            elif rule=="good_deal":
+                msg=f"テスト書籍が50%オフ：¥396（通常 ¥792）— 設定しきい値 {threshold:g}%"
+            else:
+                msg="テスト書籍がセール中：BookLive で ¥792 → ¥396（50%オフ）"
+            title="セール通知テスト"
+        else:
+            if rule=="historical_low":
+                msg="Test Book reached a new recorded low: ¥396 at BookLive"
+            elif rule=="good_deal":
+                msg=f"Test Book is 50% off: ¥396 (was ¥792) — threshold {threshold:g}%"
+            else:
+                msg="Test Book is on sale: ¥792 → ¥396 at BookLive (50% off)"
+            title="Sale notification test"
+        self._desktop_notification(title,msg)
+
     def _notify_bookwalker_expired(self):
         msg="Your BOOK☆WALKER session has expired. Sign in again to continue receiving your account-specific coin amounts."
         self.log("[BOOK☆WALKER] Saved session expired; sign in again for coin values")
-        try:
-            if self.state()=="withdrawn" and self._ensure_tray_icon():
-                self._tray_icon.notify(msg,"BOOK☆WALKER sign-in required")
-                return
-        except Exception:
-            pass
-        messagebox.showwarning("BOOK☆WALKER sign-in required",msg)
+        self._desktop_notification("BOOK☆WALKER sign-in required",msg)
 
     def _run_bookwalker_health_check(self,status_var=None,notify_expiry=False):
         previous=self.db.get_setting(
@@ -2514,7 +2549,7 @@ class App(tk.Tk):
         if button is not None:
             try: button.configure(state="disabled")
             except Exception: pass
-        if status_var is not None: status_var.set("Opening BOOK☆WALKER sign-in…")
+        if status_var is not None: status_var.set(ui_tr("Opening BOOK☆WALKER sign-in…"))
         try:
             if getattr(sys,"frozen",False):
                 cmd=[sys.executable,"--bookwalker-login-helper"]
@@ -2548,7 +2583,7 @@ class App(tk.Tk):
                     self.log("[BOOK☆WALKER] Signed-in session connected; future updates can use account coin values")
                     messagebox.showinfo("BOOK☆WALKER","BOOK☆WALKER connected. Future price updates will use the signed-in session for coin values.")
                 elif code==2:
-                    if status_var is not None: status_var.set("Not signed in — cash prices still work; coins are hidden.")
+                    if status_var is not None: status_var.set(ui_tr("Not signed in — cash prices still work; coins are hidden."))
                     messagebox.showinfo("BOOK☆WALKER","BOOK☆WALKER sign-in was not completed.")
                 else:
                     detail=""
@@ -2556,7 +2591,7 @@ class App(tk.Tk):
                     except Exception: pass
                     msg="Could not open the BOOK☆WALKER sign-in window. The Microsoft Edge WebView2 Runtime is required."
                     if detail: msg+=f"\n\n{detail}"
-                    if status_var is not None: status_var.set("Not signed in — cash prices still work; coins are hidden.")
+                    if status_var is not None: status_var.set(ui_tr("Not signed in — cash prices still work; coins are hidden."))
                     messagebox.showerror("BOOK☆WALKER",msg)
             self.after(0,finish)
         threading.Thread(target=wait_for_login,daemon=True).start()
@@ -2597,6 +2632,11 @@ class App(tk.Tk):
         row=ttk.Frame(f); row.pack(fill="x",pady=6)
         ttk.Label(row,text="Good-deal threshold (> %):").pack(side="left")
         ttk.Entry(row,textvariable=threshold,width=8).pack(side="left",padx=6)
+        test_row=ttk.Frame(f); test_row.pack(fill="x",pady=(0,6))
+        ttk.Button(test_row,text="Test sale notification",
+                   command=lambda:self._test_sale_notification(notify.get(),threshold.get())).pack(side="left")
+        ttk.Label(test_row,text="Simulates a 50% sale using the selected rule. No book data or price history is changed.",
+                  wraplength=400).pack(side="left",padx=(10,0))
         def apply_price_view():
             self.db.set_setting("include_direct_rewards","1" if rewards.get() else "0")
             self.db.set_setting("bw_overseas_tax","1" if bw_tax.get() else "0")
