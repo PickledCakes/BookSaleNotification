@@ -16,15 +16,15 @@ except ImportError:
     Image=ImageTk=None
 import csv, shutil, threading, time
 from datetime import datetime
-from scraper import providers as live_providers, parse_volume as live_parse_volume, edition_compatible as live_edition_compatible
+from scraper import providers as live_providers, parse_volume as live_parse_volume, edition_compatible as live_edition_compatible, DMMRegionError
 
 try:
     from bs4 import BeautifulSoup
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.8.13"
-APP_VERSION = "1.8.13"
+APP_NAME = "Book Sale Notification 1.8.14"
+APP_VERSION = "1.8.14"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -80,6 +80,9 @@ JA_UI={
     "Choose what should be refreshed. Only enabled stores with an existing product URL are contacted.":
         "更新内容を選択してください。既存の商品URLがある有効なストアだけにアクセスします。",
     "No matched product pages meet the selected update mode.":"選択した更新条件に該当する商品ページがありません。",
+    "DMM Books unavailable":"DMM Booksにアクセスできません",
+    "DMM Books could not be reached from the current network. DMM Books requires a Japanese IP address. Connect through a Japanese IP/VPN and try again. Other stores can still be checked.":
+        "現在のネットワークからDMM Booksにアクセスできません。DMM Booksには日本のIPアドレスが必要です。日本のIP/VPNに接続してから再試行してください。他のストアの確認は続行できます。",
     "Edit store URLs":"ストアURLを編集",
     "Edit the matched product URL for any store. Amazon URLs are automatically shortened to /dp/ASIN.":
         "各ストアの一致済み商品URLを編集できます。Amazon URLは自動的に /dp/ASIN 形式へ短縮されます。",
@@ -2264,7 +2267,7 @@ class App(tk.Tk):
             targets=[b['id'] for b,_ in self.db.rows('',False,self.current_list_id,False)]
         self.auto_backup('find_missing_matches')
         def work():
-            checked=found=merged=0; report=[]; worker_db=DB()
+            checked=found=merged=0; report=[]; dmm_region_blocked=False; worker_db=DB()
             try:
                 # First reconcile duplicate canonical entries across DIFFERENT stores only.
                 books=[worker_db.cx.execute("SELECT * FROM books WHERE id=?",(x,)).fetchone() for x in targets]
@@ -2327,10 +2330,19 @@ class App(tk.Tk):
                                     worker_db.update_offer_for_book(book_id,store,self._offer_from_live(r)); found+=1
                                     report.append(f"MATCHED {store} ({r.confidence:.3f})\n  {b['title']}\n  {r.url}")
                             else: report.append(f"NO MATCH {store}\n  {b['title']}")
+                        except DMMRegionError as e:
+                            dmm_region_blocked=True
+                            report.append(f"DMM UNAVAILABLE — Japanese IP required\n  {b['title']}\n  {e}")
                         except Exception as e: report.append(f"ERROR {store}\n  {b['title']}\n  {type(e).__name__}: {e}")
             finally:worker_db.cx.close()
             textlog=f"Find Missing Matches complete\nChecked slots: {checked}\nNew matches: {found}\nBooks merged: {merged}\n\n"+"\n\n".join(report)
             self.after(0,self.refresh); self.after(0,lambda:self.show_match_report(textlog))
+            if dmm_region_blocked:
+                self.after(0,lambda:messagebox.showwarning(
+                    "DMM Books unavailable",
+                    "DMM Books could not be reached from the current network. DMM Books requires a Japanese IP address. "
+                    "Connect through a Japanese IP/VPN and try again. Other stores can still be checked."
+                ))
         self._run_background(work)
 
     def update_prices(self):
@@ -2377,7 +2389,7 @@ class App(tk.Tk):
         self.auto_backup("update_"+mode)
 
         def work():
-            ok=0; failed=[]; worker_db=DB()
+            ok=0; failed=[]; dmm_region_blocked=False; worker_db=DB()
             try:
                 for i,(bid,store,url,locked) in enumerate(jobs,1):
                     self.after(0,lambda i=i,st=store:self.status.set(f"Updating {i}/{len(jobs)} • {st}"))
@@ -2398,6 +2410,10 @@ class App(tk.Tk):
                             self.after(0,lambda bid=saved_bid,store=store,url=r.cover_url:self.cache_cover(bid,store,url))
                         shown=("¥"+format(r.price,",")) if r.price is not None else "price not parsed"
                         self.log(f"[{store}] Updated: {r.title or url} — {shown}")
+                    except DMMRegionError as e:
+                        dmm_region_blocked=True
+                        failed.append("DMM: Japanese IP required")
+                        self.log(f"[DMM] UPDATE BLOCKED: {e}")
                     except Exception as e:
                         failed.append(f"{store}: {type(e).__name__}: {e}")
                         self.log(f"[{store}] UPDATE ERROR {type(e).__name__}: {e}")
@@ -2407,7 +2423,11 @@ class App(tk.Tk):
             label={"covers":"cover page(s) checked","missing_price":"missing-price offer(s) updated","everything":"product page(s) updated"}[mode]
             msg=f"{ok}/{len(jobs)} {label}."
             if failed:msg+="\n\nFailed:\n"+"\n".join(failed[:12])
-            self.after(0,lambda m=msg:messagebox.showinfo("Update complete",m))
+            if dmm_region_blocked:
+                msg+="\n\nDMM Books requires a Japanese IP address. Connect through a Japanese IP/VPN and try DMM again."
+                self.after(0,lambda m=msg:messagebox.showwarning("DMM Books unavailable",m))
+            else:
+                self.after(0,lambda m=msg:messagebox.showinfo("Update complete",m))
         self._run_background(work)
 
 
