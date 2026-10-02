@@ -923,6 +923,9 @@ class App(tk.Tk):
             child.destroy()
         self._build()
         self.apply_theme()
+        self.update_idletasks()
+        self._restore_main_pane()
+        self._resize_table_columns()
         self.refresh()
 
     def _build(self):
@@ -1056,7 +1059,8 @@ class App(tk.Tk):
     def _resize_table_columns(self):
         if not hasattr(self,"tree") or not hasattr(self,"table_frame"):return
         available=max(1,self.table_frame.winfo_width()-22)
-        displayed=set(self.tree.cget("displaycolumns"))
+        raw_display=self.tree.cget("displaycolumns")
+        displayed=set(self.tk.splitlist(raw_display)) if isinstance(raw_display,str) else set(raw_display)
         show_cover=self.db.get_setting("show_covers","1")=="1"
 
         # Store columns stay readable; the Book column absorbs remaining width and
@@ -1383,9 +1387,11 @@ class App(tk.Tk):
         self.tree.heading("#0",text="Cover" if show else "")
         self.tree.column("#0",width=cw if show else 0,minwidth=cw if show else 0,
                          stretch=False,anchor="center")
-        # Price cells contain a second line for timestamps. Never collapse no-cover
-        # rows to a single 24px line; use the calculated wrapped-content height.
-        ttk.Style(self).configure("Treeview",rowheight=rh if show else (no_cover_rowheight or 46))
+        # Price cells contain a second line for timestamps and long titles may wrap.
+        # Treeview has one row height for the whole widget, so size it for the tallest
+        # visible wrapped title while never making it shorter than the cover itself.
+        content_h=no_cover_rowheight or 46
+        ttk.Style(self).configure("Treeview",rowheight=max(rh,content_h) if show else content_h)
 
     def _wrap_tree_text(self,text,pixel_width):
         """Pixel-aware full wrapping for Japanese/English text displayed in Treeview cells."""
@@ -1417,17 +1423,14 @@ class App(tk.Tk):
         rows=self.db.rows(self.search.get().strip(),False,self.current_list_id,self.archived_view)
         wrapped_titles={}
         max_lines=2  # store price + observation timestamp already needs two lines
-        if not show_covers:
-            title_width=self.tree.column("title","width") or 590
-            for b,_offers in rows:
-                wrapped,nlines=self._wrap_tree_text(b["title"],title_width)
-                wrapped_titles[b["id"]]=wrapped
-                max_lines=max(max_lines,nlines)
-            # ttk.Treeview only supports one rowheight per widget, so size the current
-            # view to the tallest wrapped visible row rather than clipping individual rows.
-            self.apply_cover_view(8+19*max_lines)
-        else:
-            self.apply_cover_view()
+        title_width=self.tree.column("title","width") or 500
+        for b,_offers in rows:
+            wrapped,nlines=self._wrap_tree_text(b["title"],title_width)
+            wrapped_titles[b["id"]]=wrapped
+            max_lines=max(max_lines,nlines)
+        # ttk.Treeview supports one rowheight for the whole table, so all visible rows
+        # share the height needed by the tallest wrapped title. This prevents clipping.
+        self.apply_cover_view(8+19*max_lines)
         for b,offers in rows:
             cash=[]
             for st,o in offers.items():
