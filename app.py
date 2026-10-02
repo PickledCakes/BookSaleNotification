@@ -271,7 +271,7 @@ AMAZON_PUBLISHER_HINTS=(
     "チャンピオン","モーニング","デザート","フラワー","ガンガン","ビーム",
     "ヤング","アクション","シリウス","ゼノン","マーガレット","ドラゴン",
     "アルファポリス","ガルド","メテオ","トレイル","NOIPA","BLIC","MANGA",
-    "HJ","MF","GA","FLOS","アース・スター"
+    "HJコミックス","HJ文庫","MFコミックス","MF文庫","GA文庫","GAコミック","FLOS","アース・スター","トライゾン","異世界ヒロインファンタジー"
 )
 
 def amazon_title_for_match(title):
@@ -289,12 +289,11 @@ def amazon_title_for_match(title):
     if any(marker in tag for marker in ("特装版","合本版","単話版","無料版","セット版","分冊版","完全版","愛蔵版")):
         return s
     prefix=s[:m.start()].rstrip()
-    _base,vol=live_parse_volume(prefix)
     tag_upper=tag.upper()
     publisherish=any(h.upper() in tag_upper for h in AMAZON_PUBLISHER_HINTS)
-    # Unknown parenthetical text is stripped only when a volume is already clearly
-    # present before it, which is much safer than removing arbitrary parentheses.
-    return prefix if publisherish or vol is not None else s
+    # Unknown parenthetical text is preserved. Missing an automatic merge is safer
+    # than deleting a legitimate subtitle/edition note.
+    return prefix if publisherish else s
 
 def cross_store_title_similarity(title_a,stores_a,title_b,stores_b):
     stores_a=set(stores_a or ()); stores_b=set(stores_b or ())
