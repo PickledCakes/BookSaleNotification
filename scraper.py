@@ -580,8 +580,8 @@ class Amazon(Provider):
         try:
             decoded=html_lib.unescape(html)
             pair_re=re.compile(
-                r'"value"\s*:\s*"([A-Z0-9]{10})"\s*,\s*"name"\s*:\s*"[^"]*\\.asin"\s*}'
-                r'\s*,\s*{\s*"value"\s*:\s*"([0-9][0-9,]*)"\s*,\s*"name"\s*:\s*"[^"]*\\.displayedPrice\\.value"',
+                r'"value"\s*:\s*"([A-Z0-9]{10})"\s*,\s*"name"\s*:\s*"[^"]*\.asin"\s*}'
+                r'\s*,\s*{\s*"value"\s*:\s*"([0-9][0-9,]*)"\s*,\s*"name"\s*:\s*"[^"]*\.displayedPrice\.value"',
                 re.I
             )
             embedded=[int(v.replace(",","")) for a,v in pair_re.findall(decoded) if a.upper()==asin]
