@@ -16,7 +16,7 @@ try:
 except ImportError:
     Image=ImageTk=ImageDraw=None
 import csv, shutil, threading, time
-from datetime import datetime
+from datetime import datetime, timedelta
 from scraper import providers as live_providers, parse_volume as live_parse_volume, edition_compatible as live_edition_compatible, DMMRegionError
 
 try:
@@ -24,8 +24,16 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.9.1-beta.2"
-APP_VERSION = "1.9.1-beta.2"
+try:
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+    import matplotlib.dates as mdates
+    from matplotlib.ticker import MultipleLocator, FuncFormatter
+except ImportError:
+    Figure=FigureCanvasTkAgg=NavigationToolbar2Tk=mdates=MultipleLocator=FuncFormatter=None
+
+APP_NAME = "Book Sale Notification 1.9.1-beta.3"
+APP_VERSION = "1.9.1-beta.3"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -45,6 +53,62 @@ DB_PATH=DATA_DIR/"books.db"
 BW_SESSION_PATH=DATA_DIR/"bookwalker_session.dat"
 BW_WEBVIEW_DIR=DATA_DIR/"bookwalker_webview"
 BW_LOGIN_ERROR_PATH=DATA_DIR/"bookwalker_login_error.txt"
+INSTANCE_PORT=47653
+_SINGLE_INSTANCE_MUTEX=None
+
+def _activate_existing_instance():
+    """Ask the already-running app to restore/focus itself, including from tray."""
+    import socket
+    for _ in range(8):
+        try:
+            with socket.create_connection(("127.0.0.1",INSTANCE_PORT),timeout=0.25) as s:
+                s.sendall(b"SHOW")
+                return True
+        except OSError:
+            time.sleep(0.08)
+    if os.name=="nt":
+        try:
+            import ctypes
+            user32=ctypes.windll.user32
+            found={"hwnd":0}
+            WNDENUMPROC=ctypes.WINFUNCTYPE(ctypes.c_bool,ctypes.c_void_p,ctypes.c_void_p)
+            def enum_cb(hwnd,lparam):
+                n=user32.GetWindowTextLengthW(hwnd)
+                if n:
+                    buf=ctypes.create_unicode_buffer(n+1)
+                    user32.GetWindowTextW(hwnd,buf,n+1)
+                    if buf.value.startswith("Book Sale Notification"):
+                        found["hwnd"]=hwnd
+                        return False
+                return True
+            user32.EnumWindows(WNDENUMPROC(enum_cb),0)
+            if found["hwnd"]:
+                user32.ShowWindow(found["hwnd"],9)  # SW_RESTORE
+                user32.SetForegroundWindow(found["hwnd"])
+                return True
+        except Exception:
+            pass
+    return False
+
+def acquire_single_instance():
+    """Return False for a second main-app launch and activate the first instance."""
+    global _SINGLE_INSTANCE_MUTEX
+    if os.name!="nt":
+        return True
+    try:
+        import ctypes
+        kernel32=ctypes.windll.kernel32
+        handle=kernel32.CreateMutexW(None,False,"Local\\BookSaleNotification_MainInstance")
+        if not handle:
+            return True
+        if kernel32.GetLastError()==183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            _activate_existing_instance()
+            return False
+        _SINGLE_INSTANCE_MUTEX=handle
+    except Exception:
+        return True
+    return True
 
 def _dpapi_crypt(data, protect=True):
     """Protect BOOK☆WALKER session cookies with the current Windows user account."""
@@ -240,9 +304,9 @@ JA_UI={
     "Add from URL…":"URLから追加…","Import HTML folder…":"3ストアHTMLフォルダを読み込む…",
     "BookLive + BOOK☆WALKER + DMM live search • Amazon direct URL/HTML import + refresh (search disabled)":
         "BookLive + BOOK☆WALKER + DMM は検索対応 • Amazon はURL/HTML追加・更新対応（検索は無効）",
-    "Search:":"検索:","Delete":"削除","History":"履歴","Mark purchased":"購入済みにする",
+    "Search:":"検索:","Show only books on sale":"セール中の書籍のみ表示","Delete":"削除","History":"履歴","Mark purchased":"購入済みにする",
     "Edit store URLs":"ストアURLを編集","Find missing matches":"未登録ストアを検索","Update prices":"価格を更新",
-    "Book":"書籍","Lowest cash price":"現金最安値","Matched":"一致数","Cover":"表紙",
+    "Book":"書籍","Lowest cash price":"現金最安値","Latest sale":"最新セール","Matched":"一致数","Cover":"表紙",
     "Activity":"アクティビティ","Clear":"クリア","My List":"マイリスト","Archived":"アーカイブ",
     "Match Results":"照合結果","Close":"閉じる","Copy Log":"ログをコピー",
     "Reason":"理由","Deleted":"削除日時","Restore selected":"選択項目を復元",
@@ -1314,6 +1378,9 @@ class App(tk.Tk):
         self._tray_thread=None
         self._tray_ready=None
         self._bw_health_schedule_started=False
+        self._open_windows={}
+        self._sort_state={}
+        self._instance_socket=None
         self.minsize(MAIN_MIN_WIDTH,MAIN_MIN_HEIGHT)
         self._restore_window_geometry()
         self.protocol("WM_DELETE_WINDOW",self._on_close)
@@ -1340,6 +1407,51 @@ class App(tk.Tk):
         # after startup and then every six hours while the app remains running.
         if load_bookwalker_cookies():
             self._start_bookwalker_health_schedule()
+        self._start_instance_listener()
+
+    def _start_instance_listener(self):
+        import socket
+        try:
+            srv=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+            srv.bind(("127.0.0.1",INSTANCE_PORT)); srv.listen(2)
+            self._instance_socket=srv
+        except OSError as e:
+            self.log(f"[Instance] Activation listener unavailable: {e}")
+            return
+        def listen():
+            while True:
+                try:
+                    conn,_=srv.accept()
+                    with conn:
+                        data=conn.recv(32)
+                    if data.startswith(b"SHOW"):
+                        self.after(0,self._restore_from_tray)
+                except OSError:
+                    break
+                except Exception:
+                    pass
+        threading.Thread(target=listen,daemon=True).start()
+
+    def _single_window(self,key,title,geometry=None,resizable=True,transient=True,grab=False):
+        existing=self._open_windows.get(key)
+        try:
+            if existing is not None and existing.winfo_exists():
+                existing.deiconify(); existing.lift(); existing.focus_force()
+                return None
+        except Exception:
+            self._open_windows.pop(key,None)
+        w=tk.Toplevel(self); self._open_windows[key]=w; w.title(title)
+        if geometry:w.geometry(geometry)
+        if isinstance(resizable,tuple):w.resizable(*resizable)
+        else:w.resizable(bool(resizable),bool(resizable))
+        if transient:w.transient(self)
+        if grab:w.grab_set()
+        def cleanup(event=None):
+            if event is None or event.widget is w:
+                if self._open_windows.get(key) is w:self._open_windows.pop(key,None)
+        w.bind("<Destroy>",cleanup,add="+")
+        return w
 
     def _restore_window_geometry(self):
         saved=self.db.get_setting("main_window_geometry",MAIN_DEFAULT_GEOMETRY)
@@ -1456,6 +1568,9 @@ class App(tk.Tk):
         except Exception:
             pass
         self._tray_icon=None
+        try:
+            if self._instance_socket is not None:self._instance_socket.close()
+        except Exception:pass
         self.destroy()
 
     def _on_close(self):
@@ -1471,6 +1586,7 @@ class App(tk.Tk):
         # Rebuild the visible UI from the same database/session so the change is immediate.
         for child in list(self.winfo_children()):
             child.destroy()
+        self._open_windows.clear()
         self._build()
         self.apply_theme()
         self.update_idletasks()
@@ -1487,8 +1603,6 @@ class App(tk.Tk):
         ttk.Button(top,text=("English" if UI_LANG=="ja" else "日本語"),width=8,
                    command=self.toggle_language).pack(side="left",padx=(12,0))
         ttk.Button(top,text="Settings",command=self.settings_dialog).pack(side="right",padx=4)
-        self.sales_button=ttk.Button(top,text="Sales",command=self.sale_notification_center)
-        self.sales_button.pack(side="right",padx=4)
         ttk.Button(top,text="Check for Updates",command=self.check_for_updates).pack(side="right",padx=4)
         ttk.Button(top,text="Recently Deleted",command=self.recently_deleted).pack(side="right",padx=4)
         ttk.Button(top,text="Backup / Share",command=self.backup_share_dialog).pack(side="right",padx=4)
@@ -1515,10 +1629,10 @@ class App(tk.Tk):
         ttk.Button(bar,text="Find missing matches",command=self.find_missing_matches).pack(side="right",padx=4)
         ttk.Button(bar,text="Update prices",command=self.update_prices).pack(side="right",padx=4)
 
-        cols=("title","booklive","bookwalker","dmm","amazon","lowest","stores")
+        cols=("title","booklive","bookwalker","dmm","amazon","lowest","latest_sale","stores")
         headings={"title":"Book","booklive":"BookLive","bookwalker":"BOOK☆WALKER",
-                  "dmm":"DMM","amazon":"Amazon","lowest":"Lowest cash price","stores":"Matched"}
-        widths={"title":500,"booklive":115,"bookwalker":135,"dmm":115,"amazon":115,"lowest":150,"stores":70}
+                  "dmm":"DMM","amazon":"Amazon","lowest":"Lowest cash price","latest_sale":"Latest sale","stores":"Matched"}
+        widths={"title":500,"booklive":115,"bookwalker":135,"dmm":115,"amazon":115,"lowest":150,"latest_sale":145,"stores":70}
 
         # Main table and live activity console. Keep enough width for the complete
         # price table so the rightmost Matched column cannot disappear behind Activity.
@@ -1535,10 +1649,14 @@ class App(tk.Tk):
         self.tree.tag_configure("sale",background="#fff3bf")
         for c in cols:
             self.tree.heading(c,text=headings[c],command=lambda x=c:self.sort_by(x))
-            self.tree.column(c,width=widths[c],minwidth=55,stretch=False,
+            saved=self.db.get_setting("column_width_"+c,"")
+            try:initial=max(55,int(saved)) if saved else widths[c]
+            except Exception:initial=widths[c]
+            self.tree.column(c,width=initial,minwidth=55,stretch=False,
                              anchor="w" if c=="title" else "center")
         self.tree.column("title",minwidth=190)
         self.tree.column("lowest",minwidth=125)
+        self.tree.column("latest_sale",minwidth=120)
         self.tree.column("stores",minwidth=72)
         self.tree.heading("#0",text="Cover")
         self._cover_photos={}
@@ -1557,6 +1675,7 @@ class App(tk.Tk):
         self.tree.bind("<Double-1>",self.double_click)
         self.tree.bind("<Control-a>",self.select_all_visible)
         self.tree.bind("<Control-A>",self.select_all_visible)
+        self.tree.bind("<ButtonRelease-1>",lambda _e:self.after_idle(self._save_column_widths),add="+")
 
         ah=ttk.Frame(self.activity_frame); ah.pack(fill="x",pady=(0,4))
         ttk.Label(ah,text="Activity",font=("Segoe UI",10,"bold")).pack(side="left")
@@ -1612,27 +1731,66 @@ class App(tk.Tk):
         if old and abs(new-old)>=8:
             self.refresh()
 
+    def _save_column_widths(self):
+        if not hasattr(self,"tree"):return
+        for col in ("title","booklive","bookwalker","dmm","amazon","lowest","latest_sale","stores"):
+            try:
+                width=int(self.tree.column(col,"width"))
+                self.db.set_setting("column_width_"+col,width)
+            except Exception:
+                pass
+
+    def _fit_columns_to_content(self):
+        """Expand visible columns enough for the widest displayed line; never shrink."""
+        if not hasattr(self,"tree"):return
+        try:font=tkfont.nametofont("TkDefaultFont")
+        except Exception:return
+        raw=self.tree.cget("displaycolumns")
+        displayed=list(self.tk.splitlist(raw)) if isinstance(raw,str) else list(raw)
+        headings={"booklive":"BookLive","bookwalker":"BOOK☆WALKER","dmm":"DMM","amazon":"Amazon",
+                  "lowest":ui_tr("Lowest cash price"),"latest_sale":ui_tr("Latest sale"),"stores":ui_tr("Matched")}
+        for col in displayed:
+            if col=="title":continue
+            required=font.measure(headings.get(col,col))+26
+            for iid in self.tree.get_children(""):
+                text=str(self.tree.set(iid,col) or "")
+                for line in text.splitlines() or [""]:
+                    required=max(required,font.measure(line)+26)
+            try:
+                current=int(self.tree.column(col,"width"))
+                saved=self.db.get_setting("column_width_"+col,"")
+                saved_w=int(saved) if saved else 0
+                target=max(current,saved_w,required)
+                if target>current:
+                    self.tree.column(col,width=target)
+                    self.db.set_setting("column_width_"+col,target)
+            except Exception:
+                pass
+
     def _resize_table_columns(self):
         if not hasattr(self,"tree") or not hasattr(self,"table_frame"):return
-        available=max(1,self.table_frame.winfo_width()-22)
         raw_display=self.tree.cget("displaycolumns")
         displayed=set(self.tk.splitlist(raw_display)) if isinstance(raw_display,str) else set(raw_display)
         show_cover=self.db.get_setting("show_covers","1")=="1"
-
-        # Store columns stay readable; the Book column absorbs remaining width and
-        # wraps vertically. A horizontal scrollbar remains as a final fallback.
-        desired={
-            "booklive":100,"bookwalker":120,"dmm":95,"amazon":100,
-            "lowest":145,"stores":78
-        }
         fixed=0
-        for col,w in desired.items():
-            if col in displayed:
-                self.tree.column(col,width=w,minwidth=70 if col!="stores" else 72,stretch=False)
-                fixed+=w
-        cover_w=self.tree.column("#0","width") if show_cover else 0
-        title_w=max(190,available-fixed-cover_w)
-        self.tree.column("title",width=title_w,minwidth=190,stretch=False)
+        for col in ("booklive","bookwalker","dmm","amazon","lowest","latest_sale","stores"):
+            if col not in displayed:continue
+            try:
+                saved=self.db.get_setting("column_width_"+col,"")
+                if saved:
+                    w=max(int(self.tree.column(col,"width")),int(saved))
+                    self.tree.column(col,width=w,stretch=False)
+                fixed+=int(self.tree.column(col,"width"))
+            except Exception:pass
+        try:
+            saved_title=self.db.get_setting("column_width_title","")
+            if saved_title:
+                self.tree.column("title",width=max(190,int(saved_title)),minwidth=190,stretch=False)
+            else:
+                available=max(1,self.table_frame.winfo_width()-22)
+                cover_w=self.tree.column("#0","width") if show_cover else 0
+                self.tree.column("title",width=max(190,available-fixed-cover_w),minwidth=190,stretch=False)
+        except Exception:pass
 
     def rebuild_list_tabs(self):
         for tab in self.list_tabs.tabs(): self.list_tabs.forget(tab)
@@ -1662,8 +1820,8 @@ class App(tk.Tk):
         ttk.Button(w,text='Close',command=w.destroy).pack(side='right',padx=10,pady=(0,10)); ttk.Button(w,text='Copy Log',command=copy).pack(side='right',pady=(0,10))
 
     def recently_deleted(self):
-        w=tk.Toplevel(self); w.title('Recently Deleted'); w.geometry('900x560')
-        w.resizable(False,False)
+        w=self._single_window("recently_deleted",'Recently Deleted','900x560',resizable=(False,False))
+        if w is None:return
         t=ttk.Treeview(w,columns=('kind','title','date'),show='headings',selectmode='extended')
         for c,h,wd in [('kind','Reason',100),('title','Book',580),('date','Deleted',170)]:t.heading(c,text=h);t.column(c,width=wd)
         retention=int(self.db.get_setting('trash_retention_days','14') or 14)
@@ -1862,10 +2020,12 @@ class App(tk.Tk):
                 price=o["tax_ex_price"]
         if price is None: return "?"
         s=f"¥{price:,}"
-        if sale:
-            s=("★ SALE " if cheapest else "SALE ")+s
+        if sale and cheapest:
+            s="SALE • ★ LOWEST "+s
+        elif sale:
+            s="SALE "+s
         elif book_on_sale and cheapest:
-            s="★ CHEAPEST "+s
+            s="★ LOWEST "+s
         if self.db.get_setting("include_direct_rewards","1")=="1":
             if o["store"]=="DMM":
                 if o["reward_value"]:
@@ -1934,7 +2094,7 @@ class App(tk.Tk):
         for store,column_id in store_columns.items():
             if self.store_enabled(store):
                 visible.append(column_id)
-        visible += ["lowest","stores"]
+        visible += ["lowest","latest_sale","stores"]
         self.tree.configure(displaycolumns=visible)
         if hasattr(self,"table_frame"):
             self.after_idle(self._resize_table_columns)
@@ -2018,13 +2178,14 @@ class App(tk.Tk):
                 lowtxt += "\n" + (ui_tr("Same") if len(enabled_matched)>=2 and len(cheapest)==len(enabled_matched)
                                    else " · ".join(cheapest))
             book_sales=sale_by_book.get(b["id"],{})
+            latest_sale=max((str(r["detected_at"] or "") for r in book_sales.values()),default="")
             cheapest_overall=set(cheapest) if book_sales else set()
             vals=(wrapped_titles.get(b["id"],b["title"]),
                   self.price_text(offers.get("BookLive"),"BookLive" in book_sales,"BookLive" in cheapest_overall,bool(book_sales)),
                   self.price_text(offers.get("BOOK☆WALKER"),"BOOK☆WALKER" in book_sales,"BOOK☆WALKER" in cheapest_overall,bool(book_sales)),
                   self.price_text(offers.get("DMM"),"DMM" in book_sales,"DMM" in cheapest_overall,bool(book_sales)),
                   self.price_text(offers.get("Amazon"),"Amazon" in book_sales,"Amazon" in cheapest_overall,bool(book_sales)),
-                  lowtxt,len(enabled_matched))
+                  lowtxt,latest_sale[:16],len(enabled_matched))
             photo=""
             cp=b["cover_path"] if "cover_path" in b.keys() else ""
             if show_covers and cp and Image is not None and Path(cp).exists():
@@ -2035,69 +2196,8 @@ class App(tk.Tk):
                 except Exception: pass
             tags=("sale",) if book_sales else ()
             self.tree.insert("", "end", iid=str(b["id"]), image=photo, values=vals,tags=tags)
-        self._update_sales_button()
+        self._fit_columns_to_content()
         self.status.set(f"{len(rows)} canonical books shown • Double-click a store cell to open its public product page")
-
-    def _update_sales_button(self):
-        if not hasattr(self,"sales_button"):return
-        n=self.db.unread_sale_count()
-        self.sales_button.configure(text=(f"Sales ({n})" if n else "Sales"))
-
-    def sale_notification_center(self):
-        w=tk.Toplevel(self); w.title("Sales"); w.geometry("900x620"); w.minsize(760,500)
-        outer=ttk.Frame(w,padding=12); outer.pack(fill="both",expand=True)
-        ttk.Label(outer,text="Sale notifications",font=("Segoe UI",13,"bold")).pack(anchor="w")
-        ttk.Label(outer,text="Newest detected sales first. Select a book to open any store where it is currently on sale.",
-                  wraplength=820).pack(anchor="w",pady=(2,8))
-
-        cols=("book","detected","status","read")
-        t=ttk.Treeview(outer,columns=cols,show="headings",selectmode="browse")
-        for col,text,width in (("book","Book",500),("detected","Latest sale",150),
-                               ("status","Status",110),("read","Read",70)):
-            t.heading(col,text=text); t.column(col,width=width,anchor="w" if col=="book" else "center")
-        t.pack(fill="both",expand=True)
-
-        storebar=ttk.LabelFrame(outer,text="Current sale store links",padding=8)
-        storebar.pack(fill="x",pady=(8,0))
-        action=ttk.Frame(outer); action.pack(fill="x",pady=(8,0))
-
-        def fill():
-            for iid in t.get_children():t.delete(iid)
-            for r in self.db.sale_inbox_books():
-                status="On sale" if r["active_events"] else "Ended"
-                read="Unread" if r["unread_events"] else "Read"
-                t.insert("","end",iid=str(r["book_id"]),values=(r["title"],r["latest_sale"],status,read))
-            self._update_sales_button()
-
-        def rebuild_store_buttons(event=None):
-            for child in storebar.winfo_children():child.destroy()
-            sel=t.selection()
-            if not sel:
-                ttk.Label(storebar,text="Select a book above.").pack(anchor="w"); return
-            bid=int(sel[0]); rows=self.db.active_sale_rows(bid)
-            if not rows:
-                ttk.Label(storebar,text="This sale has ended.").pack(anchor="w"); return
-            min_price=min((r["sale_price"] for r in rows if r["sale_price"] is not None),default=None)
-            for r in rows:
-                label=f"{r['store']}  ¥{r['sale_price']:,}" if r["sale_price"] is not None else r["store"]
-                if min_price is not None and r["sale_price"]==min_price:label+="  ★ cheapest"
-                url=r["url"]; store=r["store"]
-                ttk.Button(storebar,text=label,
-                    command=lambda u=url,s=store:(webbrowser.open(u) if valid_store_url(s,u)
-                                                  else messagebox.showerror("Invalid store URL","Blocked an invalid or untrusted stored URL."))).pack(side="left",padx=(0,6))
-
-        def mark_read():
-            sel=t.selection()
-            if not sel:return
-            self.db.mark_sale_book_read(int(sel[0])); fill(); rebuild_store_buttons()
-        def mark_all():
-            self.db.mark_all_sales_read(); fill(); rebuild_store_buttons()
-
-        ttk.Button(action,text="Close",command=w.destroy).pack(side="right")
-        ttk.Button(action,text="Mark all as read",command=mark_all).pack(side="right",padx=(0,6))
-        ttk.Button(action,text="Mark selected as read",command=mark_read).pack(side="right",padx=(0,6))
-        t.bind("<<TreeviewSelect>>",rebuild_store_buttons)
-        fill(); rebuild_store_buttons()
 
     def parse_file(self,path,forced_store=None):
         with open(path,"r",encoding="utf-8",errors="ignore") as f: soup=BeautifulSoup(f,"html.parser")
@@ -2117,12 +2217,8 @@ class App(tk.Tk):
         return None
 
     def manual_add_url(self):
-        win=tk.Toplevel(self)
-        win.title("Add book from store URL")
-        win.geometry("720x205")
-        win.resizable(False,False)
-        win.transient(self)
-        win.grab_set()
+        win=self._single_window("manual_add","Add book from store URL","720x205",resizable=(False,False),grab=True)
+        if win is None:return
 
         f=ttk.Frame(win,padding=16); f.pack(fill="both",expand=True)
         ttk.Label(f,text="Add from BookLive / BOOK☆WALKER / DMM / Amazon URL",
@@ -2277,12 +2373,8 @@ class App(tk.Tk):
         rows=self.db.cx.execute("SELECT store,url,locked FROM offers WHERE book_id=?",(bid,)).fetchall()
         current={r["store"]:(r["url"] or "") for r in rows}
 
-        win=tk.Toplevel(self)
-        win.title("Edit store URLs")
-        win.geometry("900x350")
-        win.resizable(False,False)
-        win.transient(self)
-        win.grab_set()
+        win=self._single_window(("edit_url",bid),"Edit store URLs","900x350",resizable=(False,False),grab=True)
+        if win is None:return
 
         outer=ttk.Frame(win,padding=14); outer.pack(fill="both",expand=True)
         ttk.Label(outer,text=book["title"],font=("Segoe UI",11,"bold"),wraplength=850).pack(anchor="w",pady=(0,12))
@@ -2358,9 +2450,15 @@ class App(tk.Tk):
 
     def double_click(self,event):
         row=self.tree.identify_row(event.y); col=self.tree.identify_column(event.x)
-        if not row:return
-        mapping={"#2":"BookLive","#3":"BOOK☆WALKER","#4":"DMM","#5":"Amazon"}
-        store=mapping.get(col)
+        if not row or not col.startswith("#"):return
+        try:
+            display_index=int(col[1:])-1
+            if display_index<0:return
+            raw=self.tree.cget("displaycolumns")
+            displayed=list(self.tk.splitlist(raw)) if isinstance(raw,str) else list(raw)
+            column_id=displayed[display_index]
+        except Exception:return
+        store={"booklive":"BookLive","bookwalker":"BOOK☆WALKER","dmm":"DMM","amazon":"Amazon"}.get(column_id)
         if not store:return
         o=self.db.cx.execute("SELECT url FROM offers WHERE book_id=? AND store=?",(int(row),store)).fetchone()
         if o and o["url"]:
@@ -2414,7 +2512,8 @@ class App(tk.Tk):
         return path
 
     def backup_share_dialog(self):
-        w=tk.Toplevel(self); w.title("Backup, restore & sharing"); w.geometry("540x520"); w.resizable(False,False)
+        w=self._single_window("backup_share","Backup, restore & sharing","540x520",resizable=(False,False))
+        if w is None:return
         f=ttk.Frame(w,padding=16); f.pack(fill="both",expand=True)
         ttk.Label(f,text="Private recovery",font=("Segoe UI",11,"bold")).pack(anchor="w")
         ttk.Button(f,text="Save Backup As…",command=self.save_backup).pack(fill="x",pady=4)
@@ -2820,7 +2919,9 @@ class App(tk.Tk):
         threading.Thread(target=wait_for_login,daemon=True).start()
 
     def settings_dialog(self):
-        w=tk.Toplevel(self); w.title("Settings"); w.geometry("660x800"); w.minsize(620,620); w.resizable(True,True)
+        w=self._single_window("settings","Settings","660x800",resizable=True)
+        if w is None:return
+        w.minsize(620,620)
         savebar=ttk.Frame(w,padding=(16,4,16,12)); savebar.pack(fill="x",side="bottom")
         body=ttk.Frame(w); body.pack(fill="both",expand=True)
         canvas_bg="#121212" if self.db.get_setting("appearance","system")=="dark" else "#f0f0f0"
@@ -3191,8 +3292,8 @@ class App(tk.Tk):
             messagebox.showinfo("Update","Select one or more books first.")
             return
 
-        w=tk.Toplevel(self); w.title("Update selected books"); w.geometry("520x330"); w.resizable(False,False)
-        w.transient(self); w.grab_set()
+        w=self._single_window("update_prices","Update selected books","520x330",resizable=(False,False),grab=True)
+        if w is None:return
         f=ttk.Frame(w,padding=18); f.pack(fill="both",expand=True)
         ttk.Label(f,text=f"Update {len(selected)} selected book(s)",font=("Segoe UI",12,"bold")).pack(anchor="w",pady=(0,8))
         ttk.Label(f,text="Choose what should be refreshed. Only enabled stores with an existing product URL are contacted.",
@@ -3425,14 +3526,28 @@ Start-Process -FilePath (Join-Path $install $exe) -WorkingDirectory $install
         self._run_background(work)
 
     def sort_by(self,col):
-        data=[(self.tree.set(k,col),k) for k in self.tree.get_children("")]
-        def key(x):
-            m=re.search(r'¥([0-9,]+)',x[0])
-            return (0,int(m.group(1).replace(",",""))) if m else (1,x[0].lower())
-        data.sort(key=key)
-        for i,(_,k) in enumerate(data): self.tree.move(k,"",i)
+        children=list(self.tree.get_children(""))
+        previous=self._sort_state.get(col)
+        if previous is None:
+            reverse=(col=="latest_sale")
+        else:
+            reverse=not previous
+        self._sort_state[col]=reverse
+        def key(iid):
+            value=str(self.tree.set(iid,col) or "")
+            if col=="latest_sale":
+                try:return (0,datetime.fromisoformat(value).timestamp())
+                except Exception:return (1,0)
+            m=re.search(r'¥([0-9,]+)',value)
+            if m:return (0,int(m.group(1).replace(",","")))
+            return (1,value.casefold())
+        children.sort(key=key,reverse=reverse)
+        for i,iid in enumerate(children):self.tree.move(iid,"",i)
+
 
 if __name__=="__main__":
     if "--bookwalker-login-helper" in sys.argv:
         raise SystemExit(bookwalker_login_helper())
+    if not acquire_single_instance():
+        raise SystemExit(0)
     App().mainloop()
