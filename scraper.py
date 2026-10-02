@@ -310,16 +310,41 @@ class BookWalker(Provider):
         if n: taxex=money(n.get_text(" ",strip=True))
         n=soup.select_one(".t-c-product-action-parts-price__before")
         if n: listp=money(n.get_text(" ",strip=True))
-        n=soup.select_one(".t-c-product-action-parts-grant-coin__value")
-        if n:
-            m=re.search(r"([0-9][0-9,]*)",nfkc(n.get_text(" ",strip=True)))
-            if m: reward=int(m.group(1).replace(",",""))
-        # Conservative fallbacks for older/newer markup.
+        # BOOK☆WALKER shows a large first-purchase "新規限定" coin amount to
+        # signed-out visitors. That is NOT the normal reward and must never be
+        # recorded as if every user would receive it.
+        page_html=str(soup)
+        login_true=bool(re.search(r"BW_IS_LOGIN\s*=\s*true",page_html,re.I))
+        login_false=bool(re.search(r"BW_IS_LOGIN\s*=\s*false",page_html,re.I))
+        new_user_box=soup.select_one(".t-c-product-main-action__coin .t-c-product-action-parts-new-user-coin")
+        ignored_signup_coin=None
+        if new_user_box:
+            em=new_user_box.select_one("em")
+            if em:
+                m=re.search(r"([0-9][0-9,]*)",nfkc(em.get_text(" ",strip=True)))
+                if m: ignored_signup_coin=int(m.group(1).replace(",",""))
+
+        # Only the ordinary grant-coin component is eligible. On an explicitly
+        # signed-out page, leave coins unknown rather than substituting the signup
+        # promotion. If a future page omits BW_IS_LOGIN but still exposes the normal
+        # component, it can still be read safely.
+        if not login_false:
+            n=soup.select_one(".t-c-product-main-action__coin .t-c-product-action-parts-grant-coin__value")
+            if n:
+                m=re.search(r"([0-9][0-9,]*)",nfkc(n.get_text(" ",strip=True)))
+                if m: reward=int(m.group(1).replace(",",""))
+
+        # Conservative fallback, scoped to the main product coin area only. Never
+        # search the whole page because series cards and campaign modals contain
+        # unrelated coin values.
+        if reward is None and not login_false and not new_user_box:
+            coin_area=soup.select_one(".t-c-product-main-action__coin")
+            if coin_area:
+                m=re.search(r"付与コイン.{0,120}?([0-9][0-9,]*)",
+                            nfkc(coin_area.get_text(" ",strip=True)))
+                if m: reward=int(m.group(1).replace(",",""))
+
         text=soup.get_text(" ",strip=True)
-        if reward is None:
-            # Handles layouts where BOOK☆WALKER moves/removes the value class.
-            m=re.search(r"付与コイン.{0,120}?([0-9][0-9,]*)",nfkc(text))
-            if m: reward=int(m.group(1).replace(",",""))
         if price is None:
             m=re.search(r"([0-9][0-9,]*)\s*円\s*[（(]?税込",text)
             if m: price=int(m.group(1).replace(",",""))
@@ -330,7 +355,10 @@ class BookWalker(Provider):
         ci=soup.select_one('meta[property="og:image"]')
         if ci: cover=(ci.get("content") or "").strip()
         sid=url.rstrip("/").split("/")[-1]
-        self.c.logger(f"[BOOK☆WALKER] Product values: cash={price}, tax_ex={taxex}, coins={reward}")
+        if ignored_signup_coin is not None:
+            self.c.logger(f"[BOOK☆WALKER] Ignored signed-out 新規限定 signup bonus: {ignored_signup_coin} coin")
+        self.c.logger(f"[BOOK☆WALKER] Product values: cash={price}, tax_ex={taxex}, coins={reward}" +
+                      (" (signed in)" if login_true else " (signed out; normal coins unavailable)" if login_false else ""))
         return Result(self.store,title,url.split("?")[0],sid,price=price,list_price=listp,
                       reward_value=reward,tax_ex_price=taxex,cover_url=cover)
 
