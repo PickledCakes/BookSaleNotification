@@ -23,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.9.0-beta.2"
-APP_VERSION = "1.9.0-beta.2"
+APP_NAME = "Book Sale Notification 1.9.0-beta.3"
+APP_VERSION = "1.9.0-beta.3"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -2669,10 +2669,14 @@ class App(tk.Tk):
         if not GITHUB_OWNER or not GITHUB_REPO:
             if not silent: messagebox.showinfo("Updates","GitHub updates are not configured in this build yet.")
             return
+        # SQLite connection belongs to Tk's main thread. Read update-channel state
+        # before launching the network worker so the worker never touches self.db.
+        allow_prerelease=self.db.get_setting("use_prerelease_updates","0")=="1"
+        reminder_version=self.db.get_setting("last_update_reminder_version","") if automatic else ""
+        reminder_date=self.db.get_setting("last_update_reminder_date","") if automatic else ""
         self.status.set("Checking for updates…")
         def work():
             try:
-                allow_prerelease=self.db.get_setting("use_prerelease_updates","0")=="1"
                 if allow_prerelease:
                     api=f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases?per_page=30"
                     req=urllib.request.Request(api,headers={"Accept":"application/vnd.github+json","User-Agent":APP_NAME})
@@ -2710,12 +2714,13 @@ class App(tk.Tk):
 
                 if automatic:
                     today=datetime.now().date().isoformat()
-                    last_ver=self.db.get_setting("last_update_reminder_version","")
-                    last_day=self.db.get_setting("last_update_reminder_date","")
-                    if last_ver==latest and last_day==today:
+                    if reminder_version==latest and reminder_date==today:
                         return
-                    self.db.set_setting("last_update_reminder_version",latest)
-                    self.db.set_setting("last_update_reminder_date",today)
+                    # Persist reminder bookkeeping back on Tk's main thread.
+                    self.after(0,lambda latest=latest,today=today:(
+                        self.db.set_setting("last_update_reminder_version",latest),
+                        self.db.set_setting("last_update_reminder_date",today)
+                    ))
 
                 body=(release.get("body") or "").strip()
                 is_pre=bool(release.get("prerelease"))
