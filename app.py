@@ -857,6 +857,7 @@ class DB:
             except sqlite3.OperationalError: pass
         self.cx.commit()
         self._standardize_existing_titles_once()
+        self._backfill_sale_state_once()
 
     def offer_identity(self, offer):
         return (offer.store, offer.store_id or "", canonical_store_url(offer.store,offer.url))
@@ -895,6 +896,36 @@ class DB:
         ids=[r["id"] for r in self.cx.execute("SELECT id FROM books").fetchall()]
         for bid in ids:
             self.refresh_canonical_metadata(bid,commit=False)
+        self.cx.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",(marker,"1"))
+        self.cx.commit()
+
+    def _backfill_sale_state_once(self):
+        """Seed sale state for existing offers with an explicit current list price.
+
+        Historical price drops without a storefront/list-price signal are not guessed
+        during migration; they will be learned naturally on the next real price change.
+        Seeded events are marked read so upgrading does not create a wall of old alerts.
+        """
+        marker="sale_state_backfill_v1"
+        if self.cx.execute("SELECT 1 FROM settings WHERE key=?",(marker,)).fetchone():
+            return
+        now=datetime.now().isoformat(" ",timespec="seconds")
+        rows=self.cx.execute("""SELECT o.id offer_id,o.book_id,o.store,o.price,o.list_price,o.observed_at
+                                FROM offers o JOIN books b ON b.id=o.book_id
+                                WHERE b.status='active' AND o.price IS NOT NULL
+                                  AND o.list_price IS NOT NULL AND o.list_price>o.price""").fetchall()
+        for r in rows:
+            detected=r["observed_at"] or now
+            ref=int(r["list_price"]); price=int(r["price"])
+            discount=100.0*(ref-price)/ref if ref else None
+            self.cx.execute("""INSERT OR IGNORE INTO sale_state
+                (offer_id,active,reference_price,sale_price,detected_at,last_seen_at,ended_at)
+                VALUES(?,1,?,?,?,?,NULL)""",(r["offer_id"],ref,price,detected,now))
+            self.cx.execute("""INSERT INTO sale_events
+                (offer_id,book_id,store,detected_at,last_seen_at,sale_price,reference_price,discount_pct,is_read,active)
+                SELECT ?,?,?,?,?,?,?,?,1,1
+                WHERE NOT EXISTS(SELECT 1 FROM sale_events WHERE offer_id=? AND active=1)""",
+                (r["offer_id"],r["book_id"],r["store"],detected,now,price,ref,discount,r["offer_id"]))
         self.cx.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",(marker,"1"))
         self.cx.commit()
 
