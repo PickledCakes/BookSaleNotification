@@ -7,7 +7,7 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **DMM Books**
 - **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.8.7**
+> Current version: **1.8.8**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
@@ -127,6 +127,7 @@ Amazon matching uses stricter rules than the other stores. If volume information
 The **Lowest cash price** column compares cash prices only.
 
 Rewards are shown separately and do not reduce the cash comparison:
+- Signed-out BOOK☆WALKER pages may advertise a **新規限定** first-purchase bonus. The app ignores that promotional amount rather than treating it as the normal coin reward.
 
 - DMM points
 - BOOK☆WALKER coins
