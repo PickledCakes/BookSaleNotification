@@ -529,20 +529,30 @@ class Amazon(Provider):
         title=re.sub(r"\s*[:|｜-]\s*Amazon\.co\.jp.*$","",title,flags=re.I)
         title=re.sub(r"\s*[（(]\s*Kindle(?:版| Edition)\s*[）)]\s*$","",title,flags=re.I)
 
-        price=None
-        # Prefer selectors tied to the Kindle/digital buy box. Generic fallbacks are
-        # last because Amazon can show other formats on the same page.
-        for sel in (
-            "#kindle-price", "#kindle-price .a-offscreen",
+        price=None; price_source=""
+        # Amazon's current Kindle page exposes the selected digital format in the
+        # format swatch rather than the generic buy box. Check that first so a
+        # paperback/other-format price on the same page can never win accidentally.
+        price_selectors=(
+            "#tmm-grid-swatch-KINDLE .slot-price .ebook-price-value",
+            "#tmm-grid-swatch-KINDLE .slot-price",
+            "#tmm-grid-swatch-KINDLE [aria-label^='￥']",
+            "#tmm-grid-swatch-KINDLE [aria-label^='¥']",
+            "#kindle-price .a-offscreen", "#kindle-price",
             "#buybox .a-price .a-offscreen",
             "#newBuyBoxPrice", "#priceblock_ourprice",
             ".a-price[data-a-color='price'] .a-offscreen",
             ".a-price .a-offscreen",
-        ):
-            node=soup.select_one(sel)
-            if node:
-                price=money(node.get_text(" ",strip=True))
-                if price is not None:break
+        )
+        for sel in price_selectors:
+            # Some Amazon containers contain an empty hidden price before the real
+            # value, so inspect every matching node instead of select_one().
+            for node in soup.select(sel):
+                raw=(node.get("aria-label") or node.get_text(" ",strip=True) or "").strip()
+                value=money(raw)
+                if value is not None:
+                    price=value; price_source=sel; break
+            if price is not None:break
 
         listp=None
         for sel in ("#listPrice", ".basisPrice .a-offscreen", ".a-text-price .a-offscreen"):
@@ -576,7 +586,8 @@ class Amazon(Provider):
             og=soup.select_one('meta[property="og:image"]')
             if og:cover=(og.get("content") or "").strip()
 
-        self.c.logger(f"[Amazon] Direct product values: cash={price}, points={reward}, ASIN={asin}")
+        self.c.logger(f"[Amazon] Direct product values: cash={price}, points={reward}, ASIN={asin}" +
+                      (f", price_source={price_source}" if price_source else ""))
         return Result(self.store,title,canonical,asin,price=price,list_price=listp,
                       reward_value=reward,cover_url=cover)
 
