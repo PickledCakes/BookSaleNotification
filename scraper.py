@@ -557,19 +557,16 @@ class Amazon(Provider):
     def _embedded_asin_price(self,soup,html,asin):
         """Extract Amazon's ASIN-bound displayedPrice value.
 
-        Amazon frequently moves the visible Kindle price around. The acquisition
-        payload is much more stable: it contains simple name/value records such as
+        Amazon frequently moves the visible Kindle price around. Acquisition
+        payloads are more stable: they contain name/value records such as
         items[2].action.asin=B0... and items[2].action.displayedPrice.value=396.
-        Parse those records by their shared prefix rather than relying on adjacency
-        or one exact HTML escaping style.
+        Pair those fields by their shared item prefix.
         """
         target=asin.upper()
 
         def parse_records(raw):
             if not raw:return []
             text=str(raw)
-            # Saved/browser HTML may entity-encode JSON once or more, while requests
-            # responses can contain normal quotes. Normalize both forms.
             for _ in range(3):
                 decoded=html_lib.unescape(text)
                 if decoded==text:break
@@ -577,13 +574,70 @@ class Amazon(Provider):
             text=text.replace(r'\"','"')
 
             prefixes=set(); prices={}
-            # Parameter objects are flat {"value":"...","name":"..."} records.
             for block in re.findall(r'\{[^{}]{0,800}\}',text):
                 mn=re.search(r'"name"\s*:\s*"([^"]+)"',block,re.I)
                 mv=re.search(r'"value"\s*:\s*"([^"]*)"',block,re.I)
                 if not mn or not mv:continue
                 name=mn.group(1); value=mv.group(1)
-                ma=re.match(r'(.+)\.asin    def search(self,title,author=""):
+
+                ma=re.match(r'(.+)\.asin$',name,re.I)
+                if ma and value.upper()==target:
+                    prefixes.add(ma.group(1))
+
+                mp=re.match(r'(.+)\.displayedPrice\.value$',name,re.I)
+                if mp and re.fullmatch(r'[0-9][0-9,]*',value):
+                    prices[mp.group(1)]=int(value.replace(",",""))
+
+            return [prices[p] for p in prefixes if p in prices]
+
+        candidates=[]
+        # BeautifulSoup entity-decodes attribute JSON for us.
+        for tag in soup.find_all(True):
+            for value in tag.attrs.values():
+                values=value if isinstance(value,list) else [value]
+                for raw in values:
+                    if not isinstance(raw,str):continue
+                    if target not in raw or "displayedPrice" not in raw:continue
+                    candidates.extend(parse_records(raw))
+
+        # Also scan the raw response near this ASIN. This covers Amazon variants
+        # where the acquisition JSON is escaped in script/HTML rather than an attr.
+        decoded=html
+        for _ in range(3):
+            nxt=html_lib.unescape(decoded)
+            if nxt==decoded:break
+            decoded=nxt
+        pos=0
+        while True:
+            pos=decoded.find(target,pos)
+            if pos<0:break
+            candidates.extend(parse_records(decoded[max(0,pos-6000):pos+6000]))
+            pos+=len(target)
+
+        positive=[v for v in candidates if v>0]
+        if positive:return min(positive),"embedded ASIN displayedPrice"
+        if candidates:return 0,"embedded ASIN displayedPrice"
+        return None,""
+
+    def _kindle_swatch_price(self,soup,html):
+        """Read the selected Kindle-format price without touching other formats."""
+        kindle=soup.select_one("#tmm-grid-swatch-KINDLE")
+        if kindle:
+            raw=nfkc(kindle.get_text(" ",strip=True))
+            m=re.search(r"[¥￥]\s*([0-9][0-9,]*)",raw)
+            if m:return int(m.group(1).replace(",","")),"#tmm-grid-swatch-KINDLE text",m.group(0)
+
+        # Fallback for malformed/odd Amazon HTML where BeautifulSoup does not build
+        # the same subtree. Stay inside a short window beginning at the Kindle swatch.
+        decoded=html_lib.unescape(html)
+        m=re.search(r'id=["\']tmm-grid-swatch-KINDLE["\']',decoded,re.I)
+        if m:
+            chunk=nfkc(decoded[m.start():m.start()+12000])
+            pm=re.search(r"[¥￥]\s*([0-9][0-9,]*)",chunk)
+            if pm:return int(pm.group(1).replace(",","")),"raw Kindle swatch",pm.group(0)
+        return None,"",""
+
+    def search(self,title,author=""):
         self.c.logger("[Amazon] Search/discovery is disabled; direct known-URL refresh only")
         return []
 
@@ -607,31 +661,23 @@ class Amazon(Provider):
         title=re.sub(r"\s*[:|｜-]\s*Amazon\.co\.jp.*$","",title,flags=re.I)
         title=re.sub(r"\s*[（(]\s*Kindle(?:版| Edition)\s*[）)]\s*$","",title,flags=re.I)
 
-        price=None; price_source=""; price_raw=""
+        price,price_source,price_raw=self._kindle_swatch_price(soup,html)
 
-        # First try the selected Kindle format itself. Use the whole swatch text as
-        # a fallback because Amazon changes the internal slot-price markup often.
-        kindle=soup.select_one("#tmm-grid-swatch-KINDLE")
-        if kindle:
-            raw=nfkc(kindle.get_text(" ",strip=True))
-            m=re.search(r"[¥￥]\s*([0-9][0-9,]*)",raw)
-            if m:
-                price=int(m.group(1).replace(",",""))
-                price_source="#tmm-grid-swatch-KINDLE text"
-                price_raw=m.group(0)
+        # The acquisition payload binds a displayed purchase price to the exact
+        # ASIN and is more reliable than generic buy-box selectors.
+        embedded_price,embedded_source=self._embedded_asin_price(soup,html,asin)
+        if embedded_price is not None:
+            price=embedded_price
+            price_source=embedded_source
+            price_raw=str(embedded_price)
 
-        # Older/current variants with a dedicated price node.
+        # Last-resort legacy selectors, still restricted to Kindle-specific IDs.
         if price is None:
-            price_selectors=(
+            for sel in (
+                "#kindle-price .a-offscreen","#kindle-price",
                 "#tmm-grid-swatch-KINDLE .slot-price .ebook-price-value",
                 "#tmm-grid-swatch-KINDLE .slot-price",
-                "#tmm-grid-swatch-KINDLE [aria-label^='￥']",
-                "#tmm-grid-swatch-KINDLE [aria-label^='¥']",
-                "#kindle-price .a-offscreen", "#kindle-price",
-                "#buybox .a-price .a-offscreen",
-                "#newBuyBoxPrice", "#priceblock_ourprice",
-            )
-            for sel in price_selectors:
+            ):
                 for node in soup.select(sel):
                     raw=(node.get("aria-label") or node.get_text(" ",strip=True) or "").strip()
                     value=yen_money(raw)
@@ -639,17 +685,8 @@ class Amazon(Provider):
                         price=value; price_source=sel; price_raw=raw; break
                 if price is not None:break
 
-        # Most reliable fallback: Amazon's acquisition payload binds a displayed
-        # purchase price to the exact ASIN. This avoids unrelated bundle/paperback
-        # prices and does not depend on the current visual layout.
-        embedded_price,embedded_source=self._embedded_asin_price(soup,html,asin)
-        if embedded_price is not None:
-            price=embedded_price
-            price_source=embedded_source
-            price_raw=str(embedded_price)
-
         listp=None
-        for sel in ("#listPrice", ".basisPrice .a-offscreen", ".a-text-price .a-offscreen"):
+        for sel in ("#listPrice",".basisPrice .a-offscreen",".a-text-price .a-offscreen"):
             node=soup.select_one(sel)
             if node:
                 v=yen_money(node.get_text(" ",strip=True))
@@ -657,28 +694,25 @@ class Amazon(Provider):
                     listp=v; break
 
         reward=None
-        # Prefer points from the selected Kindle format rather than unrelated bundle
-        # offers elsewhere on the page.
+        # Only use points from the selected Kindle-format swatch. Do not search the
+        # whole page because bundle/related-product points can be unrelated.
         pn=soup.select_one("#tmm-grid-swatch-KINDLE .slot-buyingPoints")
         if pn:
             mm=re.search(r"(\d[\d,]*)\s*(?:pt|ポイント)",nfkc(pn.get_text(" ",strip=True)),re.I)
             if mm:reward=int(mm.group(1).replace(",",""))
         if reward is None:
-            page_text=nfkc(soup.get_text(" ",strip=True))
-            for pat in (
-                r"(\d[\d,]*)\s*ポイント",
-                r"(\d[\d,]*)\s*pt(?:\s|$)",
-            ):
-                mm=re.search(pat,page_text,re.I)
-                if mm:
-                    reward=int(mm.group(1).replace(",","")); break
+            kindle=soup.select_one("#tmm-grid-swatch-KINDLE")
+            if kindle:
+                mm=re.search(r"[（(]?\s*(\d[\d,]*)\s*(?:pt|ポイント)\s*[）)]?",
+                             nfkc(kindle.get_text(" ",strip=True)),re.I)
+                if mm:reward=int(mm.group(1).replace(",",""))
 
-        # A zero-price read paired with non-zero purchase points is contradictory.
-        # If no ASIN-bound purchase price was found, leave it unknown instead of
-        # poisoning Lowest cash price with a false ¥0.
+        # Kindle Unlimited/free-reading UI can expose a ¥0 element next to a normal
+        # purchase price. Never let an ambiguous zero overwrite the cash price.
         if price==0 and reward and embedded_price is None:
             price=None
             price_source="ambiguous Kindle ¥0 ignored"
+            price_raw=""
 
         cover=""
         img=soup.select_one("#landingImage") or soup.select_one("#imgBlkFront")
@@ -698,7 +732,6 @@ class Amazon(Provider):
                       (f", raw={price_raw!r}" if price_raw else ""))
         return Result(self.store,title,canonical,asin,price=price,list_price=listp,
                       reward_value=reward,cover_url=cover)
-
 
 def providers(delay=1.25,logger=None):
     c=Client(delay=delay,logger=logger)
