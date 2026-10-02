@@ -546,3 +546,14 @@ For 1.9:
 - Optional regular/list-price step lines can be shown.
 - Graph summary shows Current, Lowest, Highest, Average, and Last changed per enabled store.
 - Data tab defaults to **Show price changes only** and can reveal every stored observation for debugging/auditing.
+
+### beta.4 — Updater hardening
+
+- Fixes an updater failure mode exposed while moving from beta.2 to the single-instance beta.3 build.
+- Older builds could leave multiple copies running; the old updater only waited for the PID that initiated the update, so another copy from the same install folder could keep files locked and allow a partial/silent update.
+- The updater now waits for the source PID, then checks for any other Book Sale Notification processes whose executable path is the same install folder.
+- If another copy remains after a short timeout, the update aborts with a visible error instructing the user to close all windows/tray instances and retry.
+- PowerShell uses stop-on-error behavior so failed file copies no longer silently continue to relaunch an old build.
+- The updater validates that the downloaded package contains the expected executable and that the updated executable exists after copy.
+- A successful update writes an install marker before relaunch; the new app logs that marker and its running APP_VERSION on startup.
+- Because users still on beta.2 are running beta.2's old updater code, the safest one-time path to beta.4 is manual ZIP replacement after fully exiting every old instance. Once beta.4 is installed, subsequent in-app updates use the hardened updater.
