@@ -23,8 +23,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.8.15"
-APP_VERSION = "1.8.15"
+APP_NAME = "Book Sale Notification 1.9.0-beta.1"
+APP_VERSION = "1.9.0-beta.1"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
@@ -2132,7 +2132,7 @@ class App(tk.Tk):
         messagebox.showinfo("History imported",f"Merged {n} historical observations.{suffix}")
 
     def settings_dialog(self):
-        w=tk.Toplevel(self); w.title("Settings"); w.geometry("590x750"); w.resizable(False,False)
+        w=tk.Toplevel(self); w.title("Settings"); w.geometry("590x810"); w.resizable(False,False)
         f=ttk.Frame(w,padding=16); f.pack(fill="both",expand=True)
         notify=tk.StringVar(value=self.db.get_setting("notification_rule","any_sale"))
         threshold=tk.StringVar(value=self.db.get_setting("deal_threshold","20"))
@@ -2149,6 +2149,7 @@ class App(tk.Tk):
         appearance=tk.StringVar(value=self.db.get_setting("appearance","system"))
         retention=tk.StringVar(value=self.db.get_setting("trash_retention_days","14"))
         check_updates=tk.BooleanVar(value=self.db.get_setting("check_updates_on_startup","1")=="1")
+        use_prerelease=tk.BooleanVar(value=self.db.get_setting("use_prerelease_updates","0")=="1")
         ttk.Label(f,text="Notification rule",font=("Segoe UI",10,"bold")).pack(anchor="w")
         for text,val in [("Any sale","any_sale"),("Lowest recorded price","historical_low"),("Good deal","good_deal")]:
             ttk.Radiobutton(f,text=text,variable=notify,value=val).pack(anchor="w")
@@ -2198,6 +2199,10 @@ class App(tk.Tk):
         ttk.Entry(row3,textvariable=reqdelay,width=7).pack(side="left",padx=6)
         ttk.Checkbutton(f,text="Check for new versions on startup (never installs automatically)",
                         variable=check_updates).pack(anchor="w",pady=(5,2))
+        ttk.Checkbutton(f,text="Use pre-release versions (test builds)",
+                        variable=use_prerelease).pack(anchor="w",pady=(2,0))
+        ttk.Label(f,text="Pre-release builds may contain unfinished fixes. Leave this off for stable releases only.",
+                  wraplength=500).pack(anchor="w",pady=(0,4))
         ttk.Separator(f).pack(fill="x",pady=(8,6))
         ar=ttk.Frame(f); ar.pack(fill="x"); ttk.Label(ar,text="Appearance:").pack(side="left")
         appearance_values=("system","light","dark") if UI_LANG!="ja" else ("システム","ライト","ダーク")
@@ -2219,6 +2224,7 @@ class App(tk.Tk):
             self.db.set_setting("update_interval_hours",interval.get())
             self.db.set_setting("request_delay_seconds",reqdelay.get())
             self.db.set_setting("check_updates_on_startup","1" if check_updates.get() else "0")
+            self.db.set_setting("use_prerelease_updates","1" if use_prerelease.get() else "0")
             chosen_appearance=appearance_display.get(); appearance.set({"システム":"system","ライト":"light","ダーク":"dark"}.get(chosen_appearance,chosen_appearance))
             self.db.set_setting("appearance",appearance.get()); self.db.set_setting("trash_retention_days",retention.get())
             self.apply_theme()
@@ -2431,9 +2437,32 @@ class App(tk.Tk):
         self._run_background(work)
 
 
-    def _version_tuple(self, value):
-        nums=re.findall(r"\d+",str(value or ""))
-        return tuple(int(x) for x in nums[:3]) if nums else (0,)
+    def _version_key(self, value):
+        """Comparable key for stable and prerelease tags such as 1.9.0-beta.2."""
+        s=str(value or "").strip().lstrip("vV")
+        m=re.match(r"^(\d+)\.(\d+)\.(\d+)(?:[-.]?(.+))?$",s)
+        if not m:
+            nums=[int(x) for x in re.findall(r"\d+",s)[:3]]
+            while len(nums)<3: nums.append(0)
+            return (*nums,0,0)
+        major,minor,patch=(int(m.group(i)) for i in (1,2,3))
+        pre=(m.group(4) or "").lower()
+        if not pre:
+            return (major,minor,patch,4,0)
+        if pre.startswith(("rc","releasecandidate")): rank=3
+        elif pre.startswith(("beta","b")): rank=2
+        elif pre.startswith(("alpha","a")): rank=1
+        else: rank=0
+        nums=re.findall(r"\d+",pre)
+        serial=int(nums[-1]) if nums else 0
+        return (major,minor,patch,rank,serial)
+
+    def _pick_update_release(self, releases, allow_prerelease):
+        usable=[r for r in releases if isinstance(r,dict) and not r.get("draft")]
+        if not allow_prerelease:
+            usable=[r for r in usable if not r.get("prerelease")]
+        if not usable:return None
+        return max(usable,key=lambda r:self._version_key(str(r.get("tag_name",""))))
 
     def check_for_updates(self, silent=False, automatic=False):
         if not GITHUB_OWNER or not GITHUB_REPO:
@@ -2442,22 +2471,35 @@ class App(tk.Tk):
         self.status.set("Checking for updates…")
         def work():
             try:
-                api=f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-                req=urllib.request.Request(api,headers={"Accept":"application/vnd.github+json","User-Agent":APP_NAME})
-                with urllib.request.urlopen(req,timeout=15) as r:
-                    release=json.loads(r.read().decode("utf-8"))
-                latest=str(release.get("tag_name","")).lstrip("vV")
-                if self._version_tuple(latest)<=self._version_tuple(APP_VERSION):
+                allow_prerelease=self.db.get_setting("use_prerelease_updates","0")=="1"
+                if allow_prerelease:
+                    api=f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases?per_page=30"
+                    req=urllib.request.Request(api,headers={"Accept":"application/vnd.github+json","User-Agent":APP_NAME})
+                    with urllib.request.urlopen(req,timeout=15) as r:
+                        releases=json.loads(r.read().decode("utf-8"))
+                    release=self._pick_update_release(releases,True)
+                else:
+                    api=f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+                    req=urllib.request.Request(api,headers={"Accept":"application/vnd.github+json","User-Agent":APP_NAME})
+                    with urllib.request.urlopen(req,timeout=15) as r:
+                        release=json.loads(r.read().decode("utf-8"))
+
+                if not release:
                     if not silent:
-                        self.after(0,lambda latest=latest:messagebox.showinfo(
-                            "Updates",f"You're already using the latest version ({latest or APP_VERSION})."))
+                        self.after(0,lambda:messagebox.showinfo("Updates","No release is available on the selected update channel yet."))
+                    return
+
+                latest=str(release.get("tag_name","")).lstrip("vV")
+                if self._version_key(latest)<=self._version_key(APP_VERSION):
+                    if not silent:
+                        channel="pre-release" if allow_prerelease else "stable"
+                        self.after(0,lambda latest=latest,channel=channel:messagebox.showinfo(
+                            "Updates",f"You're already using the latest {channel} version ({latest or APP_VERSION})."))
                     return
 
                 asset=next((x for x in (release.get("assets") or [])
                             if x.get("name","").startswith(UPDATE_ASSET_PREFIX) and x.get("name","").endswith(".zip")),None)
                 if not asset:
-                    # A GitHub release can appear before the Windows build finishes uploading.
-                    # This is normal; don't present it as a scary runtime error.
                     if not silent:
                         self.after(0,lambda latest=latest:messagebox.showinfo(
                             "Update not ready yet",
@@ -2475,8 +2517,12 @@ class App(tk.Tk):
                     self.db.set_setting("last_update_reminder_date",today)
 
                 body=(release.get("body") or "").strip()
+                is_pre=bool(release.get("prerelease"))
                 def prompt():
-                    msg=f"Version {latest} is available.\n\n"
+                    kind="Pre-release" if is_pre else "Version"
+                    msg=f"{kind} {latest} is available.\n\n"
+                    if is_pre:
+                        msg+="This is a test build and may still contain unfinished fixes.\n\n"
                     if body and not automatic:
                         msg+=body[:1600]+"\n\n"
                     msg+="Would you like to download and install it now?\n\nNothing is installed unless you choose Yes."
