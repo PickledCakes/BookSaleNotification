@@ -408,7 +408,7 @@ The PyInstaller spec includes the needed pywebview/pythonnet and pystray modules
 
 ## Immediate testing checklist for the next chat
 
-The next chat should continue from **1.9.0-beta.4** and verify these before making 1.9 stable:
+The 1.9 beta checklist was completed successfully before promoting **1.9.0** to stable. Future work should continue from the stable 1.9.0 baseline:
 
 1. **BOOK☆WALKER login**
    - login window opens
