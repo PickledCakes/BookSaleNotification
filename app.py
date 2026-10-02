@@ -24,8 +24,8 @@ try:
 except ImportError:
     raise SystemExit("Missing dependency: beautifulsoup4. Run: py -m pip install beautifulsoup4")
 
-APP_NAME = "Book Sale Notification 1.9.0-beta.5"
-APP_VERSION = "1.9.0-beta.5"
+APP_NAME = "Book Sale Notification 1.9.0"
+APP_VERSION = "1.9.0"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
