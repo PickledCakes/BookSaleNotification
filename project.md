@@ -577,3 +577,15 @@ For 1.9:
 - Current-layout parsing reads the canonical product URL, title, cash price, author, cover URL, DMM series/item identity, visible campaign reward percentage, and relevant labels.
 - Verified against the supplied 120-item DMM saved page: all 120 wishlist items are parsed.
 - Price History hover tooltips now choose left/right and up/down placement based on the hovered point's screen position, reducing clipping at the right/top graph edges.
+
+### beta.7 — BOOK☆WALKER R-18, scheduler, URL editor
+
+- BOOK☆WALKER R-18 product pages are supported as part of the existing BOOK☆WALKER provider and reuse the saved signed-in account session.
+- Normal BOOK☆WALKER search is always tried first; the R-18 catalog is queried only if normal BOOK☆WALKER fails to produce a confident match.
+- R-18 product refresh supports the normal BOOK☆WALKER price/tax/coin selectors plus schema.org price fallback and preserves r18.bookwalker.jp product/series URLs.
+- The previously exposed Automatic update interval setting now drives a real scheduled updater across active matched offers for enabled stores.
+- Automatic runs persist their last completion time, avoid overlapping runs, dispatch normal sale notifications, and always log a completion summary such as checked offers / price-drop book count / failures.
+- Manual Edit store URLs no longer allows Tk callback exceptions to fail silently. Save errors are shown and logged.
+- Manual URL replacements now regenerate store identity for BookLive title_id+vol_no, BOOK☆WALKER de UUID, DMM product identity, and Amazon ASIN.
+- Duplicate store URL/product identities are detected before save and reported with the already-associated book title.
+- Manual URL identity changes create an automatic backup before applying changes.
