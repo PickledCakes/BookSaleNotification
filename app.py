@@ -1401,22 +1401,66 @@ class DB:
         if store not in MANUAL_URL_STORES or not valid_store_url(store,url):
             raise ValueError(f"Invalid or non-editable {store} product URL")
         url=canonical_store_url(store,url)
+
+        # A manually replaced URL is a new product identity. Keep store_id in sync
+        # immediately rather than leaving the old matched ID attached to the new URL.
         store_id=""
         if store=="Amazon":
             m=re.search(r"/dp/([A-Z0-9]{10})(?:/|$)",url,re.I)
             if m:store_id=m.group(1).upper()
+        elif store=="BOOK☆WALKER":
+            m=re.search(r"/(de[0-9a-f-]{30,})/?$",url,re.I)
+            if m:store_id=m.group(1).lower()
+        elif store=="BookLive":
+            m=re.search(r"/product/index/title_id/(\d+)/vol_no/(\d+)",url,re.I)
+            if m:store_id=f"{m.group(1)}:{m.group(2).zfill(3)}"
+        elif store=="DMM":
+            m=re.search(r"/product/(\d+)/([^/?#]+)/?",url,re.I)
+            if m and m.group(2).lower()!="latest":
+                store_id=f"{m.group(1)}:{m.group(2)}"
+
         row=self.cx.execute("SELECT * FROM offers WHERE book_id=? AND store=?",(book_id,store)).fetchone()
+
+        # Give the UI a useful error instead of allowing SQLite UNIQUE violations
+        # to escape silently from a Tk button callback.
+        args=[store,url]
+        sql="SELECT o.book_id,b.title FROM offers o JOIN books b ON b.id=o.book_id WHERE o.store=? AND o.url=?"
         if row:
-            if store_id:
-                self.cx.execute("UPDATE offers SET url=?,store_id=?,locked=1 WHERE id=?",(url,store_id,row["id"]))
+            sql+=" AND o.id!=?"; args.append(row["id"])
+        duplicate=self.cx.execute(sql,args).fetchone()
+        if duplicate:
+            raise ValueError(
+                f"This {store} product URL is already attached to another book:\n\n"
+                f"{duplicate['title']}\n\n"
+                "Remove or correct that existing match first."
+            )
+        if store_id:
+            args=[store,store_id]
+            sql="""SELECT o.book_id,b.title FROM offers o JOIN books b ON b.id=o.book_id
+                   WHERE o.store=? AND o.store_id=?"""
+            if row:
+                sql+=" AND o.id!=?"; args.append(row["id"])
+            duplicate=self.cx.execute(sql,args).fetchone()
+            if duplicate:
+                raise ValueError(
+                    f"This {store} product is already attached to another book:\n\n"
+                    f"{duplicate['title']}\n\n"
+                    "Remove or correct that existing match first."
+                )
+
+        try:
+            if row:
+                self.cx.execute("UPDATE offers SET url=?,store_id=?,locked=1 WHERE id=?",
+                                (url,store_id,row["id"]))
             else:
-                self.cx.execute("UPDATE offers SET url=?,locked=1 WHERE id=?",(url,row["id"]))
-        else:
-            self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,locked)
-                               SELECT ?,?,?,title,?,1 FROM books WHERE id=?""",
-                            (book_id,store,store_id,url,book_id))
-        self.refresh_canonical_metadata(book_id,commit=False)
-        self.cx.commit()
+                self.cx.execute("""INSERT INTO offers(book_id,store,store_id,title,url,locked)
+                                   SELECT ?,?,?,title,?,1 FROM books WHERE id=?""",
+                                (book_id,store,store_id,url,book_id))
+            self.refresh_canonical_metadata(book_id,commit=False)
+            self.cx.commit()
+        except Exception:
+            self.cx.rollback()
+            raise
 
     def get_setting(self,key,default=""):
         r=self.cx.execute("SELECT value FROM settings WHERE key=?",(key,)).fetchone()
@@ -2635,40 +2679,55 @@ class App(tk.Tk):
 
         buttons=ttk.Frame(outer); buttons.pack(fill="x",pady=(14,0))
         def save():
-            invalid=[]
-            for store,v in vars.items():
-                newurl=v.get().strip()
-                if newurl and newurl != current.get(store,"") and not valid_store_url(store,newurl):
-                    invalid.append((store,newurl))
-            if invalid:
-                store,url=invalid[0]
-                expected={"BookLive":"a BookLive product URL (booklive.jp)",
-                          "BOOK☆WALKER":"a BOOK☆WALKER product URL (bookwalker.jp/de…)",
-                          "DMM":"a DMM Books product URL (book.dmm.com/product/…)",
-                          "Amazon":"an Amazon.co.jp product URL containing /dp/ASIN"}[store]
-                messagebox.showerror("Invalid store URL",
-                    f"The URL entered for {store} is not {expected}.\n\n{url}\n\nNo changes were saved.")
-                return
-            removals=[store for store,v in vars.items() if current.get(store,"") and not v.get().strip()]
-            if removals:
-                names=", ".join(removals)
-                if not messagebox.askyesno("Remove store match",
-                    f"Remove the {names} match{'es' if len(removals)>1 else ''} from this book?\n\n"
-                    "This permanently clears that store's URL, product ID, current price, rewards and price history. "
-                    "The canonical book and its other store matches are not affected."):
+            try:
+                invalid=[]
+                planned=[]
+                for store,v in vars.items():
+                    newurl=v.get().strip()
+                    oldurl=current.get(store,"")
+                    if newurl and newurl != oldurl and not valid_store_url(store,newurl):
+                        invalid.append((store,newurl))
+                    canonical=canonical_store_url(store,newurl) if newurl else ""
+                    if canonical != oldurl:
+                        planned.append((store,oldurl,canonical))
+                if invalid:
+                    store,url=invalid[0]
+                    expected={"BookLive":"a BookLive product URL (booklive.jp)",
+                              "BOOK☆WALKER":"a BOOK☆WALKER product URL (bookwalker.jp/de… or r18.bookwalker.jp/de…)",
+                              "DMM":"a DMM Books product URL (book.dmm.com/product/…)",
+                              "Amazon":"an Amazon.co.jp product URL containing /dp/ASIN"}[store]
+                    messagebox.showerror("Invalid store URL",
+                        f"The URL entered for {store} is not {expected}.\n\n{url}\n\nNo changes were saved.")
                     return
-                self.auto_backup("remove_store_match")
-            for store,v in vars.items():
-                newurl=v.get().strip()
-                if newurl:newurl=canonical_store_url(store,newurl)
-                oldurl=current.get(store,"")
-                if newurl != oldurl:
+                if not planned:
+                    win.destroy()
+                    return
+
+                removals=[store for store,oldurl,newurl in planned if oldurl and not newurl]
+                if removals:
+                    names=", ".join(removals)
+                    if not messagebox.askyesno("Remove store match",
+                        f"Remove the {names} match{'es' if len(removals)>1 else ''} from this book?\n\n"
+                        "This permanently clears that store's URL, product ID, current price, rewards and price history. "
+                        "The canonical book and its other store matches are not affected."):
+                        return
+
+                # URL replacement is a potentially destructive identity correction too,
+                # so protect all manual edits, not just removals.
+                self.auto_backup("edit_store_url")
+                for store,oldurl,newurl in planned:
                     if newurl:
                         self.db.set_url(bid,store,newurl)
+                        self.log(f"[Manual URL] {store}: updated product URL")
                     elif oldurl:
                         self.db.remove_store_match(bid,store)
-            self.refresh()
-            win.destroy()
+                        self.log(f"[Manual URL] {store}: removed store match")
+                self.refresh()
+                win.destroy()
+            except Exception as e:
+                self.log(f"[Manual URL] Save failed: {type(e).__name__}: {e}")
+                messagebox.showerror("Could not save store URL",
+                    f"The store URL changes could not be saved.\n\n{e}")
         ttk.Button(buttons,text="Cancel",command=win.destroy).pack(side="right")
         ttk.Button(buttons,text="Save changes",command=save).pack(side="right",padx=(0,8))
 
