@@ -7,7 +7,7 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **DMM Books**
 - **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.9.1-beta.8**
+> Current version: **1.9.1-beta.9**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
@@ -229,3 +229,10 @@ GitHub Actions is configured to compile-check pushes and build Windows release p
 - Interrupted scheduled price updates can resume from their saved checkpoint when the app is reopened before the configured auto-update interval expires. If the checkpoint is older than the current interval, it is discarded and a fresh full run starts.
 - Automatic price-update checkpoints persist completed offer IDs, failures, detected price-drop books, and pending sale notifications. Deleted/archived/disabled offers are safely skipped when resuming.
 - The Activity pane now has a compact automatic-job status strip with spinner, determinate progress bar, finished/remaining book counts, failure count, and a persisted last-run summary.
+
+### 1.9.1-beta.9
+
+- Fixes the Windows self-updater when the application is installed in a directory containing Japanese or other non-ASCII characters.
+- The updater no longer embeds filesystem paths directly in a BOM-less PowerShell script. Install path, ZIP path, temp path, executable name, and target version are encoded as UTF-8/Base64 and decoded inside an ASCII-only PowerShell script, avoiding Windows PowerShell 5.1 ANSI-codepage mojibake.
+- Example paths such as `E:\\JD\\[]いただきもの\\[]AVIF元ファイル置き場\\[]Book Sale Notification` are now supported by the updated installer logic.
+- Important upgrade note: beta.8 itself still contains the old updater. If beta.8 is already installed in a non-ASCII directory and its in-app update fails, manually replace it with the beta.9 ZIP once. Updates launched by beta.9 and later use the Unicode-safe updater.
