@@ -253,14 +253,17 @@ class BookLive(Provider):
                       " / ".join(dict.fromkeys(authors)),price,listp,cover_url=cover)
 
 class BookWalker(Provider):
-    store="BOOK☆WALKER"; base="https://bookwalker.jp"
+    store="BOOK☆WALKER"; base="https://bookwalker.jp"; r18_base="https://r18.bookwalker.jp"
 
-    def _product_result(self, href, title=""):
+    def _product_result(self, href, title="", base_url=None):
         clean=href.split("?")[0]
         if not (re.search(r"bookwalker\.jp/de[0-9a-f-]{30,}/?$",clean,re.I) or
                 re.match(r"^/de[0-9a-f-]{30,}/?$",clean,re.I)):
             return None
-        u=urljoin(self.base,clean)
+        # Preserve the storefront that exposed the product. Relative links on the
+        # R-18 site must stay on r18.bookwalker.jp rather than being rewritten to
+        # the normal BOOK☆WALKER host.
+        u=urljoin(base_url or self.base,clean)
         sid=u.rstrip("/").split("/")[-1]
         t=space(title)
         if not t or t in ("試し読み","購入","カートに入れる","お気に入り"):
@@ -277,7 +280,7 @@ class BookWalker(Provider):
         # A real product link often appears multiple times in one card.  Prefer title-bearing
         # anchors/containers and reject trial/bonus UI links.
         for a in soup.find_all("a",href=True):
-            r=self._product_result(a["href"], a.get("title","") or a.get_text(" ",strip=True))
+            r=self._product_result(a["href"], a.get("title","") or a.get_text(" ",strip=True), su)
             if not r: continue
             # Require a plausible series/book title. Tiny UI labels and image-only links are ignored.
             if len(key(r.title)) < 4: continue
@@ -288,45 +291,70 @@ class BookWalker(Provider):
         return list(out.values())
 
     def search(self,title,author=""):
-        stem,wanted_vol=parse_volume(title); out={}
-        # Search the series stem first. Exact volume text can cause BW to surface bonuses.
-        for q in dict.fromkeys([stem,title]):
-            if not q:continue
-            soup=BeautifulSoup(self.c.get(f"{self.base}/search/?word={quote(q)}"),"html.parser")
-            series=[]
-            for a in soup.find_all("a",href=True):
-                m=re.search(r"/series/(\d+)/(?:list/)?",a["href"])
-                if m:
-                    series.append(f"{self.base}/series/{m.group(1)}/list/")
-            series=list(dict.fromkeys(series))
-            self.c.logger(f"[{self.store}] Found {len(series)} series page(s) from search")
-            # Rank series by their visible anchor text, then inspect a small set.
-            ranked=[]
-            for su in series:
-                sid=re.search(r"/series/(\d+)/",su).group(1)
-                texts=[space(a.get_text(" ",strip=True)) for a in soup.find_all("a",href=re.compile(rf"/series/{sid}/"))]
-                besttxt=max(texts,key=len,default="")
-                ranked.append((SequenceMatcher(None,key(stem),key(besttxt)).ratio(),su,besttxt))
-            ranked.sort(reverse=True)
-            for _,su,_ in ranked[:5]:
-                for r in self._series_products(su):
-                    out[r.url]=r
-                # If this series contains an exact base+volume candidate, don't wander into unrelated series.
-                exact=[r for r in out.values()
-                       if parse_volume(r.title)[1]==wanted_vol and
-                          SequenceMatcher(None,key(stem),key(parse_volume(r.title)[0])).ratio()>=.80]
-                if exact:
-                    self.c.logger(f"[{self.store}] Exact requested volume found on series page")
-                    return exact
-            # Fallback: individual product results from search, still excluding UI/bonus links.
-            for a in soup.find_all("a",href=True):
-                r=self._product_result(a["href"],a.get("title","") or a.get_text(" ",strip=True))
-                if r: out[r.url]=r
-            if out:break
+        stem,wanted_vol=parse_volume(title); out={}; exact_out={}
+        # BOOK☆WALKER has two searchable storefronts under the same account:
+        # the ordinary catalog and the R-18 catalog. Search both, preserving the
+        # source host so an R-18 result remains fetchable on r18.bookwalker.jp.
+        for root in (self.base,self.r18_base):
+            root_found=False
+            for q in dict.fromkeys([stem,title]):
+                if not q:continue
+                search_url=f"{root}/search/?word={quote(q)}"
+                try:
+                    soup=BeautifulSoup(self.c.get(search_url),"html.parser")
+                except Exception as e:
+                    self.c.logger(f"[{self.store}] Search failed on {root}: {type(e).__name__}: {e}")
+                    continue
+                series=[]
+                for a in soup.find_all("a",href=True):
+                    m=re.search(r"/series/(\d+)/(?:list/)?",a["href"])
+                    if m:
+                        series.append(urljoin(root,f"/series/{m.group(1)}/list/"))
+                series=list(dict.fromkeys(series))
+                label="R-18" if urlparse(root).hostname=="r18.bookwalker.jp" else "general"
+                self.c.logger(f"[{self.store}] {label} search found {len(series)} series page(s)")
+                # Rank series by their visible anchor text, then inspect a small set.
+                ranked=[]
+                for su in series:
+                    sid=re.search(r"/series/(\d+)/",su).group(1)
+                    texts=[space(a.get_text(" ",strip=True)) for a in soup.find_all("a",href=re.compile(rf"/series/{sid}/"))]
+                    besttxt=max(texts,key=len,default="")
+                    ranked.append((SequenceMatcher(None,key(stem),key(besttxt)).ratio(),su,besttxt))
+                ranked.sort(reverse=True)
+                for _,su,_ in ranked[:5]:
+                    for r in self._series_products(su):
+                        out[r.url]=r
+                        if (wanted_vol is not None and parse_volume(r.title)[1]==wanted_vol and
+                            SequenceMatcher(None,key(stem),key(parse_volume(r.title)[0])).ratio()>=.80):
+                            exact_out[r.url]=r
+                # Fallback: individual product results from search, still excluding UI/bonus links.
+                for a in soup.find_all("a",href=True):
+                    r=self._product_result(a["href"],a.get("title","") or a.get_text(" ",strip=True),root)
+                    if r:
+                        out[r.url]=r
+                        root_found=True
+                        if (wanted_vol is not None and parse_volume(r.title)[1]==wanted_vol and
+                            SequenceMatcher(None,key(stem),key(parse_volume(r.title)[0])).ratio()>=.80):
+                            exact_out[r.url]=r
+                if any(urlparse(x.url).hostname==urlparse(root).hostname for x in out.values()):
+                    root_found=True
+                if root_found:
+                    break
+        if exact_out:
+            self.c.logger(f"[{self.store}] Exact requested volume candidate(s) found across general/R-18 catalogs")
+            return list(exact_out.values())
         return list(out.values())
 
     def product(self,url):
-        soup=BeautifulSoup(self.c.get(url),"html.parser")
+        html=self.c.get(url)
+        soup=BeautifulSoup(html,"html.parser")
+        # Prefer the final/canonical R-18 URL after redirects, while retaining the
+        # caller URL as a fallback.
+        final_url=self.c.last_url or url
+        ogurl=soup.select_one('meta[property="og:url"]')
+        product_url=space(ogurl.get("content","") if ogurl else "") or final_url
+        if not re.search(r"https?://(?:[^/]+\.)?bookwalker\.jp/de[0-9a-f-]{30,}/?",product_url,re.I):
+            product_url=final_url
         og=soup.select_one('meta[property="og:title"]')
         title=space(og.get("content","") if og else "")
         title=re.sub(r"\s*[-|｜]\s*BOOK.?WALKER.*$","",title,flags=re.I)
@@ -338,6 +366,29 @@ class BookWalker(Provider):
         if n: taxex=money(n.get_text(" ",strip=True))
         n=soup.select_one(".t-c-product-action-parts-price__before")
         if n: listp=money(n.get_text(" ",strip=True))
+        # R-18 pages also publish a schema.org Product/Offer record. Use that as
+        # a structural fallback if BOOK☆WALKER changes the visible price markup.
+        if price is None:
+            for node in soup.find_all("script",type="application/ld+json"):
+                try:
+                    obj=json.loads(node.string or node.get_text() or "{}")
+                except Exception:
+                    continue
+                objs=obj if isinstance(obj,list) else [obj]
+                for item in objs:
+                    if not isinstance(item,dict) or item.get("@type")!="Product":continue
+                    offer=item.get("offers")
+                    offers=offer if isinstance(offer,list) else [offer]
+                    for off in offers:
+                        if not isinstance(off,dict):continue
+                        raw=off.get("price")
+                        try:
+                            if raw is not None: price=int(float(str(raw).replace(",","")))
+                        except Exception:
+                            pass
+                        if price is not None:break
+                    if price is not None:break
+                if price is not None:break
         # BOOK☆WALKER shows a large first-purchase "新規限定" coin amount to
         # signed-out visitors. That is NOT the normal reward and must never be
         # recorded as if every user would receive it.
@@ -382,12 +433,17 @@ class BookWalker(Provider):
         cover=""
         ci=soup.select_one('meta[property="og:image"]')
         if ci: cover=(ci.get("content") or "").strip()
-        sid=url.rstrip("/").split("/")[-1]
+        authors=[]
+        for a in soup.select(".t-c-product-main-data__authors-link, .t-c-product-main-data__authors a"):
+            t=space(a.get_text(" ",strip=True))
+            if t:authors.append(t)
+        sid=product_url.rstrip("/").split("/")[-1]
         if ignored_signup_coin is not None:
             self.c.logger(f"[BOOK☆WALKER] Ignored signed-out 新規限定 signup bonus: {ignored_signup_coin} coin")
         self.c.logger(f"[BOOK☆WALKER] Product values: cash={price}, tax_ex={taxex}, coins={reward}" +
                       (" (signed in)" if login_true else " (not signed in; coins hidden)" if login_false else ""))
-        return Result(self.store,title,url.split("?")[0],sid,price=price,list_price=listp,
+        return Result(self.store,title,product_url.split("?")[0],sid,
+                      author=" / ".join(dict.fromkeys(authors)),price=price,list_price=listp,
                       reward_value=reward,tax_ex_price=taxex,cover_url=cover)
 
 
