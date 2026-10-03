@@ -17,7 +17,7 @@ except ImportError:
     Image=ImageTk=ImageDraw=None
 import csv, shutil, threading, time
 from datetime import datetime, timedelta
-from scraper import providers as live_providers, parse_volume as live_parse_volume, edition_compatible as live_edition_compatible, DMMRegionError
+from scraper import providers as live_providers, parse_volume as live_parse_volume, edition_compatible as live_edition_compatible, DMMRegionError, BookWalkerR18AccessError
 
 try:
     from bs4 import BeautifulSoup
@@ -204,11 +204,12 @@ def check_dmm_access():
         return "unavailable",f"{type(e).__name__}: {e}"
 
 def bookwalker_login_helper():
-    """Run the real BOOK☆WALKER site in a persistent Edge WebView2 profile.
+    """Run BOOK☆WALKER in a persistent Edge WebView2 profile and save both
+    ordinary and R-18 browser session state.
 
-    pywebview owns this helper process's GUI thread. A separate monitor thread
-    checks the authenticated session and closes the window once BOOK☆WALKER
-    confirms login. The app never receives or stores the user's password.
+    After normal login succeeds, the helper visits the R-18 storefront. If the
+    certification/display gate appears, the user completes it once in the same
+    browser profile. The helper then stores both normal and R-18 cookies.
     """
     try:
         if BW_LOGIN_ERROR_PATH.exists(): BW_LOGIN_ERROR_PATH.unlink()
@@ -217,7 +218,7 @@ def bookwalker_login_helper():
     try:
         import webview
         import requests as _requests
-        result={"success":False}
+        result={"success":False,"general_ok":False,"general_records":[]}
 
         def cookie_records(window):
             records=[]
@@ -234,8 +235,16 @@ def bookwalker_login_helper():
                                     "domain":domain,"path":(morsel["path"] or "/")})
             return records
 
-        def session_is_logged_in(records):
-            if not records:return False
+        def merge_records(*groups):
+            merged={}
+            for group in groups:
+                for item in group or []:
+                    key=(item.get("name",""),item.get("domain",""),item.get("path","/"))
+                    if key[0] and item.get("value"):
+                        merged[key]=item
+            return list(merged.values())
+
+        def make_session(records):
             s=_requests.Session()
             s.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152 Safari/537.36",
                               "Accept-Language":"ja-JP,ja;q=0.9,en;q=0.6"})
@@ -246,16 +255,28 @@ def bookwalker_login_helper():
                                   path=item.get("path") or "/")
                 except Exception:
                     pass
+            return s
+
+        def session_is_logged_in(records):
+            if not records:return False
             try:
-                r=s.get("https://bookwalker.jp/",timeout=12,allow_redirects=True)
+                r=make_session(records).get("https://bookwalker.jp/",timeout=12,allow_redirects=True)
                 return bool(re.search(r"BW_IS_LOGIN\s*=\s*true",r.text,re.I))
             except Exception:
                 return False
 
+        def r18_is_authorized(records):
+            if not records:return False
+            try:
+                r=make_session(records).get("https://r18.bookwalker.jp/",timeout=12,allow_redirects=True)
+                final=urlparse(r.url)
+                if final.hostname!="r18.bookwalker.jp":return False
+                if final.path.startswith("/certify/"):return False
+                return r.status_code==200
+            except Exception:
+                return False
+
         def monitor(window):
-            # webview.start(func, ...) runs this logic in its own worker thread.
-            # Do not perform cookie/JS calls from a synchronous closing handler:
-            # Edge WebView2 can deadlock while the native window is shutting down.
             while True:
                 try:
                     current=window.get_current_url() or ""
@@ -263,21 +284,36 @@ def bookwalker_login_helper():
                     break
                 try:
                     host=(urlparse(current).hostname or "").lower()
-                    if host=="bookwalker.jp" or host.endswith(".bookwalker.jp"):
-                        records=cookie_records(window)
-                        if session_is_logged_in(records):
-                            save_bookwalker_cookies(records)
-                            result["success"]=True
-                            time.sleep(0.2)
-                            window.destroy()
-                            return
+                    records=cookie_records(window)
+
+                    if not result["general_ok"]:
+                        if (host=="bookwalker.jp" or host.endswith(".bookwalker.jp")) and session_is_logged_in(records):
+                            result["general_ok"]=True
+                            result["general_records"]=records
+                            # Do not close yet: R-18 has separate browser/certification
+                            # state which is only visible after visiting its host.
+                            window.load_url("https://r18.bookwalker.jp/")
+                            time.sleep(1.0)
+                            continue
+                    else:
+                        if host=="r18.bookwalker.jp":
+                            combined=merge_records(result["general_records"],records)
+                            # If /certify/ is visible, leave the WebView open for the
+                            # user to confirm R-18 access. Once accepted, navigation
+                            # leaves /certify/ and this verification succeeds.
+                            if not urlparse(current).path.startswith("/certify/") and r18_is_authorized(combined):
+                                save_bookwalker_cookies(combined)
+                                result["success"]=True
+                                time.sleep(0.2)
+                                window.destroy()
+                                return
                 except Exception:
                     pass
                 time.sleep(1.0)
 
         webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"]=False
         window=webview.create_window(
-            "BOOK☆WALKER Sign In — sign in normally; this window closes when connected",
+            "BOOK☆WALKER Sign In — after login, complete the R-18 confirmation if shown",
             "https://bookwalker.jp/",width=1050,height=780,resizable=True)
         webview.start(monitor,window,gui="edgechromium",private_mode=False,
                       storage_path=str(BW_WEBVIEW_DIR))
@@ -1656,6 +1692,9 @@ class App(tk.Tk):
                         dmm_region_blocked=True
                         failed.append("DMM: Japanese IP required")
                         self.log(f"[DMM] AUTO UPDATE BLOCKED: {e}")
+                    except BookWalkerR18AccessError as e:
+                        failed.append("BOOK☆WALKER R-18: certification required")
+                        self.log(f"[BOOK☆WALKER] AUTO UPDATE BLOCKED: {e}")
                     except Exception as e:
                         failed.append(f"{store}: {type(e).__name__}: {e}")
                         self.log(f"[{store}] AUTO UPDATE ERROR {type(e).__name__}: {e}")
@@ -3890,6 +3929,9 @@ class App(tk.Tk):
                         dmm_region_blocked=True
                         failed.append("DMM: Japanese IP required")
                         self.log(f"[DMM] UPDATE BLOCKED: {e}")
+                    except BookWalkerR18AccessError as e:
+                        failed.append("BOOK☆WALKER R-18: certification required")
+                        self.log(f"[BOOK☆WALKER] UPDATE BLOCKED: {e}")
                     except Exception as e:
                         failed.append(f"{store}: {type(e).__name__}: {e}")
                         self.log(f"[{store}] UPDATE ERROR {type(e).__name__}: {e}")
