@@ -589,3 +589,13 @@ For 1.9:
 - Manual URL replacements now regenerate store identity for BookLive title_id+vol_no, BOOK☆WALKER de UUID, DMM product identity, and Amazon ASIN.
 - Duplicate store URL/product identities are detected before save and reported with the already-associated book title.
 - Manual URL identity changes create an automatic backup before applying changes.
+
+### beta.8 — R-18 authorization + resumable auto updater
+
+- R-18 BOOK☆WALKER redirects to `/certify/` are detected explicitly and raise a dedicated access error instead of saving a no-price refresh.
+- Settings keeps normal BOOK☆WALKER sign-in separate and adds **Enable R-18 access**, which opens the same persistent WebView2 profile on the R-18 storefront and saves/merges the resulting host certification cookies into the encrypted BOOK☆WALKER session.
+- Scheduled auto-price runs persist a JSON checkpoint after every attempted offer. A real application exit during a run records the interruption time.
+- On startup, an interrupted checkpoint resumes only when the time since interruption is less than the **current** configured automatic-update interval. Older checkpoints are discarded and restarted from the beginning.
+- Resume state is keyed by offer IDs rather than a numeric cursor, so deleted, archived, disabled, or edited offers can be re-resolved safely.
+- A compact Activity-pane job strip shows animated spinner state, a progress bar, `Updating Prices X/Y`, remaining book count, and failures. Progress is counted in unique books while store offers remain the internal work units.
+- Completion collapses to a persisted summary such as last run time, books checked, price-drop book count, and failures.
