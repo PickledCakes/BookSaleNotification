@@ -7,7 +7,7 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **DMM Books**
 - **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.9.1-beta.7**
+> Current version: **1.9.1-beta.8**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
@@ -222,3 +222,10 @@ py app.py
 ```
 
 GitHub Actions is configured to compile-check pushes and build Windows release packages.
+
+### 1.9.1-beta.8
+
+- BOOK☆WALKER R-18 authorization is handled separately from ordinary account login using the same persistent WebView2 profile; R-18 certification redirects are reported explicitly instead of being treated as successful product refreshes.
+- Interrupted scheduled price updates can resume from their saved checkpoint when the app is reopened before the configured auto-update interval expires. If the checkpoint is older than the current interval, it is discarded and a fresh full run starts.
+- Automatic price-update checkpoints persist completed offer IDs, failures, detected price-drop books, and pending sale notifications. Deleted/archived/disabled offers are safely skipped when resuming.
+- The Activity pane now has a compact automatic-job status strip with spinner, determinate progress bar, finished/remaining book counts, failure count, and a persisted last-run summary.
