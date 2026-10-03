@@ -7,7 +7,7 @@ A Windows desktop app for tracking Japanese ebook prices across:
 - **DMM Books**
 - **Amazon Kindle** — direct URL / HTML import + direct refresh of known Amazon URLs; Amazon search is still disabled
 
-> Current version: **1.9.1-beta.6**
+> Current version: **1.9.1-beta.7**
 
 Book Sale Notification keeps one combined watchlist, matches the same volume across stores, compares current cash prices, records price history, stores covers, and lets you archive books you have already bought.
 
@@ -48,7 +48,10 @@ Book Sale Notification keeps one combined watchlist, matches the same volume acr
 - History now stores price-change events only. Existing repeated unchanged observations are compacted once on upgrade after an automatic database backup, and future unchanged refreshes do not add rows.
 - History graph hover uses nearest-point snapping so a single recorded observation is still inspectable, and dark-mode legend/tooltips use readable themed colors.
 - History Data supports deleting selected historical records with confirmation and an automatic backup; deleting history does not alter the current store price.
-- DMM HTML import supports both the legacy table layout and the current DMM "あとで買う" list layout.
+- DMM HTML import supports both selectable DMM "あとで買う" display layouts.
+- BOOK☆WALKER R-18 is used as a fallback catalog only when the normal BOOK☆WALKER search does not produce a confident match; signed-in session cookies are reused for R-18 product refreshes.
+- Automatic price updates now actually run on the configured interval and always write a completion summary to Activity, including how many books dropped in price.
+- Manual store-URL editing now reports save failures instead of silently doing nothing, refreshes store product IDs for BookLive / BOOK☆WALKER / DMM / Amazon, and backs up before URL identity changes.
 - Price History tooltips automatically flip left/right and up/down near chart edges so hover details stay inside the graph.
 
 Matching is intentionally conservative. It is better for the app to leave a store blank than attach the wrong volume or edition.
