@@ -32,8 +32,8 @@ try:
 except ImportError:
     Figure=FigureCanvasTkAgg=NavigationToolbar2Tk=mdates=MultipleLocator=FuncFormatter=None
 
-APP_NAME = "Book Sale Notification 1.9.1-beta.8"
-APP_VERSION = "1.9.1-beta.8"
+APP_NAME = "Book Sale Notification 1.9.1-beta.9"
+APP_VERSION = "1.9.1-beta.9"
 # Set these before publishing GitHub releases.
 GITHUB_OWNER = "PickledCakes"
 GITHUB_REPO = "BookSaleNotification"
