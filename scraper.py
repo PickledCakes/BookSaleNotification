@@ -291,12 +291,11 @@ class BookWalker(Provider):
         return list(out.values())
 
     def search(self,title,author=""):
-        stem,wanted_vol=parse_volume(title); out={}; exact_out={}
-        # BOOK☆WALKER has two searchable storefronts under the same account:
-        # the ordinary catalog and the R-18 catalog. Search both, preserving the
-        # source host so an R-18 result remains fetchable on r18.bookwalker.jp.
-        for root in (self.base,self.r18_base):
-            root_found=False
+        stem,wanted_vol=parse_volume(title)
+
+        def search_catalog(root):
+            out={}; exact_out={}
+            label="R-18" if urlparse(root).hostname=="r18.bookwalker.jp" else "general"
             for q in dict.fromkeys([stem,title]):
                 if not q:continue
                 search_url=f"{root}/search/?word={quote(q)}"
@@ -305,45 +304,59 @@ class BookWalker(Provider):
                 except Exception as e:
                     self.c.logger(f"[{self.store}] Search failed on {root}: {type(e).__name__}: {e}")
                     continue
+
                 series=[]
                 for a in soup.find_all("a",href=True):
                     m=re.search(r"/series/(\d+)/(?:list/)?",a["href"])
                     if m:
                         series.append(urljoin(root,f"/series/{m.group(1)}/list/"))
                 series=list(dict.fromkeys(series))
-                label="R-18" if urlparse(root).hostname=="r18.bookwalker.jp" else "general"
                 self.c.logger(f"[{self.store}] {label} search found {len(series)} series page(s)")
-                # Rank series by their visible anchor text, then inspect a small set.
+
                 ranked=[]
                 for su in series:
                     sid=re.search(r"/series/(\d+)/",su).group(1)
-                    texts=[space(a.get_text(" ",strip=True)) for a in soup.find_all("a",href=re.compile(rf"/series/{sid}/"))]
+                    texts=[space(a.get_text(" ",strip=True)) for a in soup.find_all(
+                        "a",href=re.compile(rf"/series/{sid}/"))]
                     besttxt=max(texts,key=len,default="")
                     ranked.append((SequenceMatcher(None,key(stem),key(besttxt)).ratio(),su,besttxt))
                 ranked.sort(reverse=True)
+
                 for _,su,_ in ranked[:5]:
                     for r in self._series_products(su):
                         out[r.url]=r
                         if (wanted_vol is not None and parse_volume(r.title)[1]==wanted_vol and
                             SequenceMatcher(None,key(stem),key(parse_volume(r.title)[0])).ratio()>=.80):
                             exact_out[r.url]=r
-                # Fallback: individual product results from search, still excluding UI/bonus links.
+
                 for a in soup.find_all("a",href=True):
                     r=self._product_result(a["href"],a.get("title","") or a.get_text(" ",strip=True),root)
                     if r:
                         out[r.url]=r
-                        root_found=True
                         if (wanted_vol is not None and parse_volume(r.title)[1]==wanted_vol and
                             SequenceMatcher(None,key(stem),key(parse_volume(r.title)[0])).ratio()>=.80):
                             exact_out[r.url]=r
-                if any(urlparse(x.url).hostname==urlparse(root).hostname for x in out.values()):
-                    root_found=True
-                if root_found:
+
+                if out:
                     break
-        if exact_out:
-            self.c.logger(f"[{self.store}] Exact requested volume candidate(s) found across general/R-18 catalogs")
-            return list(exact_out.values())
-        return list(out.values())
+
+            candidates=list(exact_out.values()) if exact_out else list(out.values())
+            return candidates
+
+        # Normal BOOK☆WALKER is always tried first. Only touch the R-18 storefront
+        # when the ordinary catalog does not contain a candidate that would pass
+        # the provider's normal confidence threshold.
+        normal=search_catalog(self.base)
+        normal_good=[r for r in normal if score(title,r.title,author,r.author)>=.90]
+        if normal_good:
+            self.c.logger(f"[{self.store}] General catalog produced a confident match; R-18 fallback skipped")
+            return normal
+
+        self.c.logger(f"[{self.store}] No confident general match; trying R-18 fallback")
+        adult=search_catalog(self.r18_base)
+        if adult:
+            return adult
+        return normal
 
     def product(self,url):
         html=self.c.get(url)
