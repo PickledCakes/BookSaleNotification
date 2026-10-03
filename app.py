@@ -1,5 +1,5 @@
 from __future__ import annotations
-import sys, os, subprocess, tempfile, hashlib, urllib.request, shutil
+import sys, os, subprocess, tempfile, hashlib, urllib.request, shutil, base64
 import requests
 import json, os, re, sqlite3, sys, unicodedata, webbrowser
 from dataclasses import dataclass
@@ -4297,13 +4297,21 @@ class App(tk.Tk):
                     if actual.lower()!=digest.split(":",1)[1].lower(): raise RuntimeError("SHA-256 verification failed.")
                 exe=Path(sys.executable)
                 ps=tmp/"apply_update.ps1"
+                # Keep the PowerShell source itself ASCII-only. Windows PowerShell 5.1
+                # can decode BOM-less .ps1 files using the system ANSI code page, which
+                # corrupts Japanese/non-ASCII install paths. Pass every path/value as
+                # base64-encoded UTF-8 and decode it inside PowerShell instead.
                 script = """$ErrorActionPreference = 'Stop'
 $pidToWait = __PID__
-$zip = '__ZIP__'
-$install = '__INSTALL__'
-$exe = '__EXE__'
-$expectedVersion = '__VERSION__'
-$log = Join-Path '__TMP__' 'update.log'
+function Decode-Utf8([string]$value) {
+    return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($value))
+}
+$zip = Decode-Utf8 '__ZIP_B64__'
+$install = Decode-Utf8 '__INSTALL_B64__'
+$exe = Decode-Utf8 '__EXE_B64__'
+$expectedVersion = Decode-Utf8 '__VERSION_B64__'
+$tmpDir = Decode-Utf8 '__TMP_B64__'
+$log = Join-Path $tmpDir 'update.log'
 
 function Log($msg) { Add-Content -LiteralPath $log -Value ((Get-Date -Format s) + "  " + $msg) }
 
@@ -4325,7 +4333,7 @@ try {
         throw "Another Book Sale Notification instance from this install folder is still running. Close it from the system tray and run the update again."
     }
 
-    $stage = Join-Path '__TMP__' 'stage'
+    $stage = Join-Path $tmpDir 'stage'
     if (Test-Path $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     Expand-Archive -LiteralPath $zip -DestinationPath $stage -Force
     $items = @(Get-ChildItem -LiteralPath $stage)
@@ -4355,9 +4363,15 @@ catch {
     ) | Out-Null
 }
 """
-                esc=lambda x:str(x).replace("'","''")
-                script=script.replace("__PID__",str(os.getpid())).replace("__ZIP__",esc(zpath)).replace("__INSTALL__",esc(exe.parent)).replace("__EXE__",esc(exe.name)).replace("__TMP__",esc(tmp)).replace("__VERSION__",esc(version))
-                ps.write_text(script,encoding="utf-8")
+                b64=lambda x:base64.b64encode(str(x).encode("utf-8")).decode("ascii")
+                script=(script.replace("__PID__",str(os.getpid()))
+                        .replace("__ZIP_B64__",b64(zpath))
+                        .replace("__INSTALL_B64__",b64(exe.parent))
+                        .replace("__EXE_B64__",b64(exe.name))
+                        .replace("__TMP_B64__",b64(tmp))
+                        .replace("__VERSION_B64__",b64(version)))
+                # ASCII source avoids all PowerShell 5.1 script-decoding ambiguity.
+                ps.write_text(script,encoding="ascii")
                 subprocess.Popen(["powershell.exe","-NoProfile","-ExecutionPolicy","Bypass","-File",str(ps)],
                                  creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
                 self.after(0,self._exit_application)
