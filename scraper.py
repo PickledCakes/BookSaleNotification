@@ -252,6 +252,11 @@ class BookLive(Provider):
         return Result(self.store,title,u,f"{m.group(1)}:{m.group(2).zfill(3)}" if m else "",
                       " / ".join(dict.fromkeys(authors)),price,listp,cover_url=cover)
 
+class BookWalkerR18AccessError(RuntimeError):
+    """R-18 BOOK☆WALKER redirected to its certification/display gate."""
+    pass
+
+
 class BookWalker(Provider):
     store="BOOK☆WALKER"; base="https://bookwalker.jp"; r18_base="https://r18.bookwalker.jp"
 
@@ -360,6 +365,16 @@ class BookWalker(Provider):
 
     def product(self,url):
         html=self.c.get(url)
+        requested_host=(urlparse(url).hostname or "").lower()
+        final=urlparse(self.c.last_url or url)
+        if requested_host=="r18.bookwalker.jp" and (
+            final.hostname=="r18.bookwalker.jp" and final.path.startswith("/certify/")
+        ):
+            self.c.logger("[BOOK☆WALKER] R-18 access redirected to certification gate")
+            raise BookWalkerR18AccessError(
+                "BOOK☆WALKER R-18 needs its browser certification/display setting enabled. "
+                "Open Settings, sign in to BOOK☆WALKER again, and complete the R-18 confirmation shown in the sign-in window."
+            )
         soup=BeautifulSoup(html,"html.parser")
         # Prefer the final/canonical R-18 URL after redirects, while retaining the
         # caller URL as a fallback.
