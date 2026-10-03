@@ -1580,6 +1580,8 @@ class App(tk.Tk):
         self._bw_health_schedule_started=False
         self._auto_price_after_id=None
         self._auto_price_update_running=False
+        self._auto_spinner_after_id=None
+        self._auto_spinner_index=0
         self._open_windows={}
         self._sort_state={}
         self._instance_socket=None
@@ -1621,22 +1623,96 @@ class App(tk.Tk):
         self._start_instance_listener()
         self._schedule_auto_price_update()
 
-    def _schedule_auto_price_update(self):
-        """Schedule the next automatic all-offer price refresh.
+    def _auto_interval_seconds(self):
+        try:
+            return max(0.25,float(self.db.get_setting("update_interval_hours","6")))*60*60
+        except Exception:
+            return 6*60*60
 
-        The first run on an installation happens shortly after startup. Later runs
-        honor the configured interval and persist their completion time so restarting
-        the app does not reset the clock.
-        """
+    def _load_auto_checkpoint(self,db=None):
+        db=db or self.db
+        raw=db.get_setting("auto_price_checkpoint","")
+        if not raw:return None
+        try:
+            cp=json.loads(raw)
+            return cp if isinstance(cp,dict) and cp.get("jobs") is not None else None
+        except Exception:
+            return None
+
+    def _auto_checkpoint_is_fresh(self,cp):
+        if not cp:return False
+        ref=self.db.get_setting("auto_price_last_exit_at","") or cp.get("updated_at") or cp.get("started_at")
+        if not ref:return False
+        try:
+            elapsed=(datetime.now()-datetime.fromisoformat(ref)).total_seconds()
+            return 0 <= elapsed < self._auto_interval_seconds()
+        except Exception:
+            return False
+
+    def _save_auto_checkpoint(self,db,cp):
+        cp["updated_at"]=datetime.now().isoformat(timespec="seconds")
+        db.set_setting("auto_price_checkpoint",json.dumps(cp,ensure_ascii=False,separators=(",",":")))
+
+    def _clear_auto_checkpoint(self,db=None):
+        db=db or self.db
+        db.set_setting("auto_price_checkpoint","")
+        db.set_setting("auto_price_last_exit_at","")
+
+    def _animate_auto_spinner(self):
+        if not self._auto_price_update_running:
+            self._auto_spinner_after_id=None
+            return
+        frames=("◐","◓","◑","◒")
+        self._auto_spinner_index=(self._auto_spinner_index+1)%len(frames)
+        base=getattr(self,"_auto_job_base_text","Updating Prices")
+        if hasattr(self,"auto_job_text"):
+            self.auto_job_text.set(f"{frames[self._auto_spinner_index]} {base}")
+        self._auto_spinner_after_id=self.after(180,self._animate_auto_spinner)
+
+    def _set_auto_job_running(self,finished,total,resuming=False,failed=0):
+        label="Resuming Price Update" if resuming else "Updating Prices"
+        left=max(0,total-finished)
+        extra=f" • {left} left"
+        if failed:extra+=f" • {failed} failed"
+        self._auto_job_base_text=f"{label}  {finished}/{total}{extra}"
+        if hasattr(self,"auto_job_progress"):
+            self.auto_job_progress.configure(maximum=max(1,total),value=min(finished,total))
+            if not self.auto_job_progress.winfo_ismapped():
+                self.auto_job_progress.pack(fill="x",pady=(5,0))
+        if self._auto_spinner_after_id is None:
+            self._auto_spinner_index=0
+            self._animate_auto_spinner()
+
+    def _set_auto_job_finished(self,summary):
+        if self._auto_spinner_after_id is not None:
+            try:self.after_cancel(self._auto_spinner_after_id)
+            except Exception:pass
+            self._auto_spinner_after_id=None
+        if hasattr(self,"auto_job_progress"):
+            self.auto_job_progress.pack_forget()
+        if hasattr(self,"auto_job_text"):
+            self.auto_job_text.set(summary)
+        self.db.set_setting("last_auto_price_summary",summary)
+
+    def _schedule_auto_price_update(self):
+        """Schedule a fresh run or promptly resume a recent interrupted run."""
         if self._auto_price_after_id is not None:
             try:self.after_cancel(self._auto_price_after_id)
             except Exception:pass
             self._auto_price_after_id=None
-        try:
-            hours=max(0.25,float(self.db.get_setting("update_interval_hours","6")))
-        except Exception:
-            hours=6.0
-        interval_seconds=hours*60*60
+
+        cp=self._load_auto_checkpoint()
+        if cp:
+            if self._auto_checkpoint_is_fresh(cp):
+                self.log("[Auto Update] Recent interrupted run found; resuming shortly")
+                self._auto_price_after_id=self.after(3000,self._run_auto_price_update)
+                return
+            self.log("[Auto Update] Interrupted run is older than the configured interval; starting fresh")
+            self._clear_auto_checkpoint()
+            self._auto_price_after_id=self.after(5000,self._run_auto_price_update)
+            return
+
+        interval_seconds=self._auto_interval_seconds()
         last=self.db.get_setting("last_auto_price_update_at","")
         delay_seconds=60.0
         if last:
@@ -1659,74 +1735,150 @@ class App(tk.Tk):
 
         def work():
             worker_db=DB()
-            ok=0; failed=[]; lowered_books=set(); sale_events=[]; total=0
-            dmm_region_blocked=False
+            completed=datetime.now()
             try:
                 enabled=set(self.enabled_stores())
-                jobs=worker_db.cx.execute("""SELECT o.book_id,o.store,o.url,o.price
-                    FROM offers o JOIN books b ON b.id=o.book_id
-                    WHERE b.status='active' AND o.url!=''
-                    ORDER BY o.book_id,o.store""").fetchall()
-                jobs=[r for r in jobs if r["store"] in enabled and r["store"] in self.providers]
-                total=len(jobs)
-                if total:
-                    self.log(f"[Auto Update] Starting scheduled price update • {total} offer(s)")
-                for bid_store in jobs:
-                    bid=bid_store["book_id"]; store=bid_store["store"]; url=bid_store["url"]
-                    old_price=bid_store["price"]
-                    try:
-                        r=self.providers[store].product(url)
-                        if not r.title:
-                            brow=worker_db.cx.execute("SELECT title FROM books WHERE id=?",(bid,)).fetchone()
-                            r.title=brow["title"] if brow else ""
-                        fetched=self._offer_from_live(r)
-                        # Keep the associated URL authoritative for scheduled refreshes;
-                        # provider canonicalization still updates its parsed store ID.
-                        fetched.url=url
-                        worker_db.update_sale_state_for_refresh(bid,store,r.price,r.list_price)
-                        sale_event=self._sale_event_for_refresh(worker_db,bid,store,r.price,r.list_price)
-                        saved_bid=worker_db.update_offer_for_book(bid,store,fetched)
-                        ok+=1
-                        if old_price is not None and r.price is not None and r.price < old_price:
-                            lowered_books.add(bid)
-                        if sale_event:sale_events.append(sale_event)
-                        if getattr(r,"cover_url",""):
-                            self.after(0,lambda bid=saved_bid,store=store,url=r.cover_url:self.cache_cover(bid,store,url))
-                    except DMMRegionError as e:
-                        dmm_region_blocked=True
-                        failed.append("DMM: Japanese IP required")
-                        self.log(f"[DMM] AUTO UPDATE BLOCKED: {e}")
-                    except BookWalkerR18AccessError as e:
-                        failed.append("BOOK☆WALKER R-18: certification required")
-                        self.log(f"[BOOK☆WALKER] AUTO UPDATE BLOCKED: {e}")
-                    except Exception as e:
-                        failed.append(f"{store}: {type(e).__name__}: {e}")
-                        self.log(f"[{store}] AUTO UPDATE ERROR {type(e).__name__}: {e}")
+                cp=self._load_auto_checkpoint(worker_db)
+                resuming=bool(cp and self._auto_checkpoint_is_fresh(cp))
+
+                if not resuming:
+                    if cp:
+                        self._clear_auto_checkpoint(worker_db)
+                    rows=worker_db.cx.execute("""SELECT o.id offer_id,o.book_id,o.store,o.url
+                        FROM offers o JOIN books b ON b.id=o.book_id
+                        WHERE b.status='active' AND o.url!=''
+                        ORDER BY o.book_id,o.store,o.id""").fetchall()
+                    jobs=[{"offer_id":r["offer_id"],"book_id":r["book_id"],
+                           "store":r["store"],"url":r["url"]}
+                          for r in rows if r["store"] in enabled and r["store"] in self.providers]
+                    cp={"version":1,
+                        "started_at":datetime.now().isoformat(timespec="seconds"),
+                        "updated_at":datetime.now().isoformat(timespec="seconds"),
+                        "jobs":jobs,
+                        "completed_offer_ids":[],
+                        "lowered_book_ids":[],
+                        "failures":[],
+                        "sale_events":[]}
+                    self._save_auto_checkpoint(worker_db,cp)
+                    worker_db.set_setting("auto_price_last_exit_at","")
+                else:
+                    jobs=list(cp.get("jobs") or [])
+                    self.log(f"[Auto Update] Resuming interrupted scheduled update")
+
+                all_book_ids=[]
+                by_book={}
+                for j in jobs:
+                    bid=int(j["book_id"]); oid=int(j["offer_id"])
+                    if bid not in by_book:
+                        all_book_ids.append(bid); by_book[bid]=[]
+                    by_book[bid].append(oid)
+                total_books=len(all_book_ids)
+                completed_ids={int(x) for x in cp.get("completed_offer_ids") or []}
+                lowered_books={int(x) for x in cp.get("lowered_book_ids") or []}
+                failures=list(cp.get("failures") or [])
+                sale_events=list(cp.get("sale_events") or [])
+
+                def finished_book_count():
+                    return sum(1 for bid in all_book_ids
+                               if all(oid in completed_ids for oid in by_book.get(bid,[])))
+
+                self.after(0,lambda:self._set_auto_job_running(
+                    finished_book_count(),total_books,resuming,len(failures)))
+                self.log(f"[Auto Update] {'Resuming' if resuming else 'Starting'} scheduled price update • {total_books} book(s) • {len(jobs)} offer(s)")
+
+                for job in jobs:
+                    oid=int(job["offer_id"])
+                    if oid in completed_ids:
+                        continue
+
+                    # Re-resolve each pending job from the live DB so edits, archived
+                    # books, disabled stores, and deleted offers are handled safely.
+                    row=worker_db.cx.execute("""SELECT o.id offer_id,o.book_id,o.store,o.url,o.price,b.status
+                        FROM offers o JOIN books b ON b.id=o.book_id WHERE o.id=?""",(oid,)).fetchone()
+                    if (not row or row["status"]!="active" or row["store"] not in enabled
+                            or row["store"] not in self.providers or not row["url"]):
+                        completed_ids.add(oid)
+                    else:
+                        bid=row["book_id"]; store=row["store"]; url=row["url"]; old_price=row["price"]
+                        try:
+                            r=self.providers[store].product(url)
+                            if not r.title:
+                                brow=worker_db.cx.execute("SELECT title FROM books WHERE id=?",(bid,)).fetchone()
+                                r.title=brow["title"] if brow else ""
+                            fetched=self._offer_from_live(r); fetched.url=url
+                            worker_db.update_sale_state_for_refresh(bid,store,r.price,r.list_price)
+                            sale_event=self._sale_event_for_refresh(worker_db,bid,store,r.price,r.list_price)
+                            saved_bid=worker_db.update_offer_for_book(bid,store,fetched)
+                            if old_price is not None and r.price is not None and r.price < old_price:
+                                lowered_books.add(int(bid))
+                            if sale_event:
+                                sale_events.append(sale_event)
+                            if getattr(r,"cover_url",""):
+                                self.after(0,lambda bid=saved_bid,store=store,url=r.cover_url:self.cache_cover(bid,store,url))
+                        except DMMRegionError as ex:
+                            failures.append(f"DMM: Japanese IP required")
+                            self.log(f"[DMM] AUTO UPDATE BLOCKED: {ex}")
+                        except BookWalkerR18AccessError as ex:
+                            failures.append("BOOK☆WALKER R-18: certification required")
+                            self.log(f"[BOOK☆WALKER] AUTO UPDATE BLOCKED: {ex}")
+                        except Exception as ex:
+                            failures.append(f"{store}: {type(ex).__name__}: {ex}")
+                            self.log(f"[{store}] AUTO UPDATE ERROR {type(ex).__name__}: {ex}")
+                        finally:
+                            # A failed offer still counts as attempted for this run.
+                            # It will be retried on the next fresh scheduled cycle.
+                            completed_ids.add(oid)
+
+                    cp["completed_offer_ids"]=sorted(completed_ids)
+                    cp["lowered_book_ids"]=sorted(lowered_books)
+                    cp["failures"]=failures[-200:]
+                    cp["sale_events"]=sale_events[-200:]
+                    self._save_auto_checkpoint(worker_db,cp)
+                    done_books=finished_book_count()
+                    self.after(0,lambda done=done_books,total=total_books,resume=resuming,fc=len(failures):
+                               self._set_auto_job_running(done,total,resume,fc))
+
+                completed=datetime.now()
+                worker_db.set_setting("last_auto_price_update_at",completed.isoformat(timespec="seconds"))
+                self._clear_auto_checkpoint(worker_db)
+
+                drop_count=len(lowered_books)
+                if total_books==0:
+                    summary="Last price update: no active matched books to check"
+                    log_summary="[Auto Update] Finished • no active matched offers to check"
+                else:
+                    summary=f"Last price update: {completed.strftime('%H:%M')} • {total_books} checked"
+                    log_summary=f"[Auto Update] Finished • {total_books}/{total_books} book(s) checked"
+                    if drop_count:
+                        phrase=f"{drop_count} book{'s' if drop_count!=1 else ''} price went down"
+                        summary+=f" • {phrase}"; log_summary+=f" • {phrase}"
+                    else:
+                        summary+=" • no price drops"; log_summary+=" • no price drops"
+                    if failures:
+                        summary+=f" • {len(failures)} failed"; log_summary+=f" • {len(failures)} failed"
+                worker_db.set_setting("last_auto_price_summary",summary)
+
+                def finish():
+                    self._auto_price_update_running=False
+                    self.refresh()
+                    self.status.set("Ready")
+                    self.log(log_summary)
+                    self._set_auto_job_finished(summary)
+                    if sale_events:
+                        self._dispatch_sale_events(list(sale_events))
+                    self._schedule_auto_price_update()
+                self.after(0,finish)
+            except Exception as ex:
+                self.log(f"[Auto Update] RUN ERROR {type(ex).__name__}: {ex}")
+                def fail_finish():
+                    self._auto_price_update_running=False
+                    summary="Automatic price update interrupted • will resume next time"
+                    self._set_auto_job_finished(summary)
+                    self.status.set("Ready")
+                    self._schedule_auto_price_update()
+                self.after(0,fail_finish)
             finally:
                 worker_db.cx.close()
-
-            completed=datetime.now()
-            def finish():
-                self._auto_price_update_running=False
-                self.db.set_setting("last_auto_price_update_at",completed.isoformat(timespec="seconds"))
-                self.refresh()
-                self.status.set("Ready")
-                drop_count=len(lowered_books)
-                if total==0:
-                    summary="[Auto Update] Finished • no active matched offers to check"
-                else:
-                    summary=f"[Auto Update] Finished • {ok}/{total} offer(s) checked"
-                    if drop_count:
-                        summary+=f" • {drop_count} book{'s' if drop_count!=1 else ''} price went down"
-                    else:
-                        summary+=" • no price drops"
-                    if failed:
-                        summary+=f" • {len(failed)} failed"
-                self.log(summary)
-                if sale_events:
-                    self._dispatch_sale_events(list(sale_events))
-                self._schedule_auto_price_update()
-            self.after(0,finish)
 
         threading.Thread(target=work,daemon=True).start()
 
@@ -1881,6 +2033,12 @@ class App(tk.Tk):
 
     def _exit_application(self):
         try:
+            if self._auto_price_update_running:
+                self.db.set_setting("auto_price_last_exit_at",datetime.now().isoformat(timespec="seconds"))
+                self.log("[Auto Update] Exit requested during scheduled update; resume checkpoint saved")
+        except Exception:
+            pass
+        try:
             if self.state()!="withdrawn":self._save_window_state()
         except Exception:
             pass
@@ -2001,6 +2159,18 @@ class App(tk.Tk):
         ah=ttk.Frame(self.activity_frame); ah.pack(fill="x",pady=(0,4))
         ttk.Label(ah,text="Activity",font=("Segoe UI",10,"bold")).pack(side="left")
         ttk.Button(ah,text="Clear",command=lambda:self.activity_clear()).pack(side="right")
+
+        self.auto_job_frame=ttk.Frame(self.activity_frame,padding=(7,6))
+        self.auto_job_frame.pack(fill="x",pady=(0,6))
+        self.auto_job_text=tk.StringVar(value=self.db.get_setting(
+            "last_auto_price_summary","Automatic price update has not run yet."))
+        self.auto_job_label=ttk.Label(self.auto_job_frame,textvariable=self.auto_job_text,
+                                      font=("Segoe UI",9,"bold"),wraplength=285)
+        self.auto_job_label.pack(fill="x")
+        self.auto_job_progress=ttk.Progressbar(self.auto_job_frame,mode="determinate",maximum=1,value=0)
+        self.auto_job_progress.pack(fill="x",pady=(5,0))
+        self.auto_job_progress.pack_forget()
+
         self.activity=tk.Text(self.activity_frame,width=38,wrap="word",font=("Consolas",9),state="disabled")
         ay=ttk.Scrollbar(self.activity_frame,orient="vertical",command=self.activity.yview)
         self.activity.configure(yscrollcommand=ay.set)
