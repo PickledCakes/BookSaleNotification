@@ -203,13 +203,12 @@ def check_dmm_access():
     except Exception as e:
         return "unavailable",f"{type(e).__name__}: {e}"
 
-def bookwalker_login_helper():
-    """Run BOOK☆WALKER in a persistent Edge WebView2 profile and save both
-    ordinary and R-18 browser session state.
+def bookwalker_login_helper(r18_only=False):
+    """Run BOOK☆WALKER in the persistent Edge WebView2 profile.
 
-    After normal login succeeds, the helper visits the R-18 storefront. If the
-    certification/display gate appears, the user completes it once in the same
-    browser profile. The helper then stores both normal and R-18 cookies.
+    Normal mode saves the ordinary signed-in session. R-18 mode opens the R-18
+    storefront and waits for its browser certification/display gate to be
+    completed, then merges those host cookies into the saved BOOK☆WALKER session.
     """
     try:
         if BW_LOGIN_ERROR_PATH.exists(): BW_LOGIN_ERROR_PATH.unlink()
@@ -218,7 +217,7 @@ def bookwalker_login_helper():
     try:
         import webview
         import requests as _requests
-        result={"success":False,"general_ok":False,"general_records":[]}
+        result={"success":False}
 
         def cookie_records(window):
             records=[]
@@ -270,11 +269,12 @@ def bookwalker_login_helper():
             try:
                 r=make_session(records).get("https://r18.bookwalker.jp/",timeout=12,allow_redirects=True)
                 final=urlparse(r.url)
-                if final.hostname!="r18.bookwalker.jp":return False
-                if final.path.startswith("/certify/"):return False
-                return r.status_code==200
+                return (r.status_code==200 and final.hostname=="r18.bookwalker.jp"
+                        and not final.path.startswith("/certify/"))
             except Exception:
                 return False
+
+        saved_before=load_bookwalker_cookies()
 
         def monitor(window):
             while True:
@@ -285,36 +285,38 @@ def bookwalker_login_helper():
                 try:
                     host=(urlparse(current).hostname or "").lower()
                     records=cookie_records(window)
+                    combined=merge_records(saved_before,records)
 
-                    if not result["general_ok"]:
-                        if (host=="bookwalker.jp" or host.endswith(".bookwalker.jp")) and session_is_logged_in(records):
-                            result["general_ok"]=True
-                            result["general_records"]=records
-                            # Do not close yet: R-18 has separate browser/certification
-                            # state which is only visible after visiting its host.
-                            window.load_url("https://r18.bookwalker.jp/")
-                            time.sleep(1.0)
-                            continue
-                    else:
-                        if host=="r18.bookwalker.jp":
-                            combined=merge_records(result["general_records"],records)
-                            # If /certify/ is visible, leave the WebView open for the
-                            # user to confirm R-18 access. Once accepted, navigation
-                            # leaves /certify/ and this verification succeeds.
-                            if not urlparse(current).path.startswith("/certify/") and r18_is_authorized(combined):
+                    if r18_only:
+                        # Stay open on /certify/ so the user can complete the
+                        # age/display confirmation. The persistent WebView profile
+                        # keeps any account login required along the way.
+                        if host=="r18.bookwalker.jp" and not urlparse(current).path.startswith("/certify/"):
+                            if r18_is_authorized(combined):
                                 save_bookwalker_cookies(combined)
                                 result["success"]=True
                                 time.sleep(0.2)
                                 window.destroy()
                                 return
+                    else:
+                        if (host=="bookwalker.jp" or host.endswith(".bookwalker.jp")) and session_is_logged_in(combined):
+                            save_bookwalker_cookies(combined)
+                            result["success"]=True
+                            time.sleep(0.2)
+                            window.destroy()
+                            return
                 except Exception:
                     pass
                 time.sleep(1.0)
 
         webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"]=False
-        window=webview.create_window(
-            "BOOK☆WALKER Sign In — after login, complete the R-18 confirmation if shown",
-            "https://bookwalker.jp/",width=1050,height=780,resizable=True)
+        if r18_only:
+            title="BOOK☆WALKER R-18 Access — complete the confirmation shown"
+            start_url="https://r18.bookwalker.jp/"
+        else:
+            title="BOOK☆WALKER Sign In — sign in normally; this window closes when connected"
+            start_url="https://bookwalker.jp/"
+        window=webview.create_window(title,start_url,width=1050,height=780,resizable=True)
         webview.start(monitor,window,gui="edgechromium",private_mode=False,
                       storage_path=str(BW_WEBVIEW_DIR))
         return 0 if result["success"] else 2
@@ -427,6 +429,8 @@ JA_UI={
     "Amazon (HTML import + direct price refresh only)":"Amazon（HTML読込・直接価格更新のみ）",
     "BOOK☆WALKER account":"BOOK☆WALKERアカウント",
     "Sign in to BOOK☆WALKER":"BOOK☆WALKERにログイン",
+    "Enable R-18 access":"R-18アクセスを有効化",
+    "R-18 access connected":"R-18アクセス接続済み",
     "Saved BOOK☆WALKER session":"BOOK☆WALKERログイン保存済み",
     "Not signed in — cash prices still work; coins are hidden.":"未ログイン — 現金価格は取得できますが、コインは表示しません。",
     "Opening BOOK☆WALKER sign-in…":"BOOK☆WALKERのログイン画面を開いています…",
@@ -3488,6 +3492,46 @@ class App(tk.Tk):
             self.after(0,finish)
         threading.Thread(target=wait_for_login,daemon=True).start()
 
+    def _start_bookwalker_r18_access(self,status_var=None):
+        if os.name!="nt":
+            messagebox.showerror("BOOK☆WALKER","BOOK☆WALKER R-18 authorization is currently available in the Windows build.")
+            return
+        try:
+            if getattr(sys,"frozen",False):
+                cmd=[sys.executable,"--bookwalker-r18-helper"]
+            else:
+                cmd=[sys.executable,str(Path(__file__).resolve()),"--bookwalker-r18-helper"]
+            proc=subprocess.Popen(cmd,cwd=str(DATA_DIR),
+                                  creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
+        except Exception as e:
+            messagebox.showerror("BOOK☆WALKER",f"Could not open the R-18 authorization window.\n\n{type(e).__name__}: {e}")
+            return
+
+        def wait_for_r18():
+            code=proc.wait()
+            cookies=load_bookwalker_cookies()
+            def finish():
+                if code==0 and cookies:
+                    try:
+                        delay=float(self.db.get_setting("request_delay_seconds","1.25"))
+                        self.providers=live_providers(delay,self.log,cookies)
+                    except Exception:
+                        pass
+                    self.log("[BOOK☆WALKER] R-18 browser certification connected")
+                    if status_var is not None:status_var.set(ui_tr("R-18 access connected"))
+                    messagebox.showinfo("BOOK☆WALKER","BOOK☆WALKER R-18 access is connected. R-18 price refreshes can now use the saved browser session.")
+                elif code==2:
+                    messagebox.showinfo("BOOK☆WALKER","R-18 authorization was not completed.")
+                else:
+                    detail=""
+                    try:detail=BW_LOGIN_ERROR_PATH.read_text(encoding="utf-8").strip()
+                    except Exception:pass
+                    msg="Could not open the BOOK☆WALKER R-18 authorization window."
+                    if detail:msg+=f"\n\n{detail}"
+                    messagebox.showerror("BOOK☆WALKER",msg)
+            self.after(0,finish)
+        threading.Thread(target=wait_for_r18,daemon=True).start()
+
     def settings_dialog(self):
         w=self._single_window("settings","Settings","660x800",resizable=True)
         if w is None:return
@@ -3574,6 +3618,8 @@ class App(tk.Tk):
         bw_status=tk.StringVar(value=ui_tr(bw_initial))
         bw_button=ttk.Button(bw_login,text="Sign in to BOOK☆WALKER")
         bw_button.pack(side="left")
+        ttk.Button(bw_login,text="Enable R-18 access",
+                   command=lambda:self._start_bookwalker_r18_access(bw_status)).pack(side="left",padx=(6,0))
         ttk.Button(bw_login,text="Check now",
                    command=lambda:self._run_bookwalker_health_check(bw_status,notify_expiry=True)).pack(side="left",padx=(6,0))
         ttk.Label(bw_login,textvariable=bw_status,wraplength=250).pack(side="left",padx=(10,0))
@@ -4166,7 +4212,9 @@ catch {
 
 if __name__=="__main__":
     if "--bookwalker-login-helper" in sys.argv:
-        raise SystemExit(bookwalker_login_helper())
+        raise SystemExit(bookwalker_login_helper(False))
+    if "--bookwalker-r18-helper" in sys.argv:
+        raise SystemExit(bookwalker_login_helper(True))
     if not acquire_single_instance():
         raise SystemExit(0)
     App().mainloop()
