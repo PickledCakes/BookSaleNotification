@@ -1494,6 +1494,8 @@ class App(tk.Tk):
         self._tray_thread=None
         self._tray_ready=None
         self._bw_health_schedule_started=False
+        self._auto_price_after_id=None
+        self._auto_price_update_running=False
         self._open_windows={}
         self._sort_state={}
         self._instance_socket=None
@@ -1533,6 +1535,113 @@ class App(tk.Tk):
         if load_bookwalker_cookies():
             self._start_bookwalker_health_schedule()
         self._start_instance_listener()
+        self._schedule_auto_price_update()
+
+    def _schedule_auto_price_update(self):
+        """Schedule the next automatic all-offer price refresh.
+
+        The first run on an installation happens shortly after startup. Later runs
+        honor the configured interval and persist their completion time so restarting
+        the app does not reset the clock.
+        """
+        if self._auto_price_after_id is not None:
+            try:self.after_cancel(self._auto_price_after_id)
+            except Exception:pass
+            self._auto_price_after_id=None
+        try:
+            hours=max(0.25,float(self.db.get_setting("update_interval_hours","6")))
+        except Exception:
+            hours=6.0
+        interval_seconds=hours*60*60
+        last=self.db.get_setting("last_auto_price_update_at","")
+        delay_seconds=60.0
+        if last:
+            try:
+                last_dt=datetime.fromisoformat(last)
+                elapsed=max(0.0,(datetime.now()-last_dt).total_seconds())
+                delay_seconds=max(5.0,interval_seconds-elapsed)
+            except Exception:
+                delay_seconds=60.0
+        self._auto_price_after_id=self.after(
+            int(min(delay_seconds,interval_seconds)*1000),self._run_auto_price_update)
+
+    def _run_auto_price_update(self):
+        self._auto_price_after_id=None
+        if self._auto_price_update_running:
+            self.log("[Auto Update] Previous price update is still running; retrying later")
+            self._schedule_auto_price_update()
+            return
+        self._auto_price_update_running=True
+
+        def work():
+            worker_db=DB()
+            ok=0; failed=[]; lowered_books=set(); sale_events=[]; total=0
+            dmm_region_blocked=False
+            try:
+                enabled=set(self.enabled_stores())
+                jobs=worker_db.cx.execute("""SELECT o.book_id,o.store,o.url,o.price
+                    FROM offers o JOIN books b ON b.id=o.book_id
+                    WHERE b.status='active' AND o.url!=''
+                    ORDER BY o.book_id,o.store""").fetchall()
+                jobs=[r for r in jobs if r["store"] in enabled and r["store"] in self.providers]
+                total=len(jobs)
+                if total:
+                    self.log(f"[Auto Update] Starting scheduled price update • {total} offer(s)")
+                for bid_store in jobs:
+                    bid=bid_store["book_id"]; store=bid_store["store"]; url=bid_store["url"]
+                    old_price=bid_store["price"]
+                    try:
+                        r=self.providers[store].product(url)
+                        if not r.title:
+                            brow=worker_db.cx.execute("SELECT title FROM books WHERE id=?",(bid,)).fetchone()
+                            r.title=brow["title"] if brow else ""
+                        fetched=self._offer_from_live(r)
+                        # Keep the associated URL authoritative for scheduled refreshes;
+                        # provider canonicalization still updates its parsed store ID.
+                        fetched.url=url
+                        worker_db.update_sale_state_for_refresh(bid,store,r.price,r.list_price)
+                        sale_event=self._sale_event_for_refresh(worker_db,bid,store,r.price,r.list_price)
+                        saved_bid=worker_db.update_offer_for_book(bid,store,fetched)
+                        ok+=1
+                        if old_price is not None and r.price is not None and r.price < old_price:
+                            lowered_books.add(bid)
+                        if sale_event:sale_events.append(sale_event)
+                        if getattr(r,"cover_url",""):
+                            self.after(0,lambda bid=saved_bid,store=store,url=r.cover_url:self.cache_cover(bid,store,url))
+                    except DMMRegionError as e:
+                        dmm_region_blocked=True
+                        failed.append("DMM: Japanese IP required")
+                        self.log(f"[DMM] AUTO UPDATE BLOCKED: {e}")
+                    except Exception as e:
+                        failed.append(f"{store}: {type(e).__name__}: {e}")
+                        self.log(f"[{store}] AUTO UPDATE ERROR {type(e).__name__}: {e}")
+            finally:
+                worker_db.cx.close()
+
+            completed=datetime.now()
+            def finish():
+                self._auto_price_update_running=False
+                self.db.set_setting("last_auto_price_update_at",completed.isoformat(timespec="seconds"))
+                self.refresh()
+                self.status.set("Ready")
+                drop_count=len(lowered_books)
+                if total==0:
+                    summary="[Auto Update] Finished • no active matched offers to check"
+                else:
+                    summary=f"[Auto Update] Finished • {ok}/{total} offer(s) checked"
+                    if drop_count:
+                        summary+=f" • {drop_count} book{'s' if drop_count!=1 else ''} price went down"
+                    else:
+                        summary+=" • no price drops"
+                    if failed:
+                        summary+=f" • {len(failed)} failed"
+                self.log(summary)
+                if sale_events:
+                    self._dispatch_sale_events(list(sale_events))
+                self._schedule_auto_price_update()
+            self.after(0,finish)
+
+        threading.Thread(target=work,daemon=True).start()
 
     def _start_instance_listener(self):
         import socket
@@ -3422,6 +3531,7 @@ class App(tk.Tk):
             self.apply_theme()
             try:self.providers=live_providers(float(reqdelay.get()), self.log,load_bookwalker_cookies())
             except:pass
+            self._schedule_auto_price_update()
             w.destroy()
         footer_dark=(self.db.get_setting("appearance","system")=="dark")
         btn_bg="#2a2a2a" if footer_dark else "#f4f4f4"
