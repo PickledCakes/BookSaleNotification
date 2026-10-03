@@ -1623,9 +1623,10 @@ class App(tk.Tk):
         self._start_instance_listener()
         self._schedule_auto_price_update()
 
-    def _auto_interval_seconds(self):
+    def _auto_interval_seconds(self,db=None):
+        db=db or self.db
         try:
-            return max(0.25,float(self.db.get_setting("update_interval_hours","6")))*60*60
+            return max(0.25,float(db.get_setting("update_interval_hours","6")))*60*60
         except Exception:
             return 6*60*60
 
@@ -1639,13 +1640,14 @@ class App(tk.Tk):
         except Exception:
             return None
 
-    def _auto_checkpoint_is_fresh(self,cp):
+    def _auto_checkpoint_is_fresh(self,cp,db=None):
         if not cp:return False
-        ref=self.db.get_setting("auto_price_last_exit_at","") or cp.get("updated_at") or cp.get("started_at")
+        db=db or self.db
+        ref=db.get_setting("auto_price_last_exit_at","") or cp.get("updated_at") or cp.get("started_at")
         if not ref:return False
         try:
             elapsed=(datetime.now()-datetime.fromisoformat(ref)).total_seconds()
-            return 0 <= elapsed < self._auto_interval_seconds()
+            return 0 <= elapsed < self._auto_interval_seconds(db)
         except Exception:
             return False
 
@@ -1737,9 +1739,13 @@ class App(tk.Tk):
             worker_db=DB()
             completed=datetime.now()
             try:
-                enabled=set(self.enabled_stores())
+                store_setting_keys={"BookLive":"store_booklive_enabled",
+                                    "BOOK☆WALKER":"store_bookwalker_enabled",
+                                    "DMM":"store_dmm_enabled","Amazon":"store_amazon_enabled"}
+                enabled={store for store,key in store_setting_keys.items()
+                         if worker_db.get_setting(key,"1")=="1"}
                 cp=self._load_auto_checkpoint(worker_db)
-                resuming=bool(cp and self._auto_checkpoint_is_fresh(cp))
+                resuming=bool(cp and self._auto_checkpoint_is_fresh(cp,worker_db))
 
                 if not resuming:
                     if cp:
