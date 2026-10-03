@@ -599,3 +599,11 @@ For 1.9:
 - Resume state is keyed by offer IDs rather than a numeric cursor, so deleted, archived, disabled, or edited offers can be re-resolved safely.
 - A compact Activity-pane job strip shows animated spinner state, a progress bar, `Updating Prices X/Y`, remaining book count, and failures. Progress is counted in unique books while store offers remain the internal work units.
 - Completion collapses to a persisted summary such as last run time, books checked, price-drop book count, and failures.
+
+### beta.9 — Unicode-safe Windows updater
+
+- Fixes self-update failures when the portable application folder contains Japanese/double-byte/non-ASCII characters.
+- Root cause: Windows PowerShell 5.1 may decode BOM-less UTF-8 `.ps1` source using the active ANSI code page, corrupting embedded install paths into mojibake before file operations begin.
+- The generated updater PowerShell source is now ASCII-only. Dynamic values (install path, update ZIP path, temp directory, executable name, expected version) are UTF-8 encoded and Base64-wrapped in Python, then decoded to .NET Unicode strings inside PowerShell.
+- This avoids both script-source codepage ambiguity and direct non-ASCII path interpolation.
+- beta.8 cannot retroactively use this fix: beta.8 users whose install path already triggers the bug may require a one-time manual ZIP replacement to beta.9. Subsequent in-app updates use the fixed updater.
